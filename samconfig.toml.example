@@ -1,0 +1,19 @@
+# Example samconfig — copy to samconfig.toml and adjust.
+# Do not commit samconfig.toml (gitignored). Never put JWT here in a committed file.
+
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "cardtrader-inventory"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+region = "eu-central-1"
+confirm_changeset = true
+parameter_overrides = "ScheduleEnabled=\"true\""
+# Alarms email (SNS — confirm subscription in inbox):
+# parameter_overrides = "ScheduleEnabled=\"true\" AlarmEmail=\"you@example.com\""
+# Optional JWT at deploy (prefer setting Lambda env in console after first deploy):
+# parameter_overrides = "CardTraderJwt=REPLACE_ME ScheduleEnabled=\"true\""
+
+[default.global.parameters]
+region = "eu-central-1"

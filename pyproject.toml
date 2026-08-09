@@ -1,0 +1,17 @@
+[project]
+name = "cardtrader-inventory"
+version = "0.1.0"
+description = "Personal CardTrader MTG inventory pricing automation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

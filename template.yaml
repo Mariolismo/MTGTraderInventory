@@ -1,0 +1,693 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CardTrader reprice — Plan + Apply via Step Functions (LIVE scheduled hourly).
+
+Parameters:
+  CardTraderJwt:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional at deploy time; set on Lambdas in console if left empty.
+  ScheduleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable EventBridge LIVE schedule (every hour).
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: Email for CloudWatch alarm notifications (SNS). Leave empty to skip subscription.
+  InventoryChangeAlarmPct:
+    Type: Number
+    Default: 20
+    Description: >
+      Alarm if |InventoryValue| hourly change vs previous sample is at least this
+      percent, while PriceUpdatesApplied is 0 and CardsInInventory moved less than 10%
+      (filters expected bulk add/remove noise).
+  LambdaDurationAlarmMs:
+    Type: Number
+    Default: 720000
+    Description: Alarm if any reprice Lambda Duration max exceeds this (default 12 min; timeout is 15 min).
+
+Conditions:
+  HasJwt: !Not [!Equals [!Ref CardTraderJwt, ""]]
+  ScheduleIsEnabled: !Equals [!Ref ScheduleEnabled, "true"]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 900
+    MemorySize: 1024
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        ARTIFACTS_BUCKET: !Ref ArtifactsBucket
+        IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+        MARKETPLACE_SAFE_RPS: "6"
+        MARKETPLACE_MAX_WORKERS: "16"
+        MIN_COMPARABLE_OFFERS: "3"
+        MARKET_MEDIAN_WINDOW: "5"
+        MAX_COMP_SPREAD_PCT: "50"
+        MIN_CHANGE_CENTS: "5"
+        MIN_CHANGE_PCT: "1"
+        MAX_DECREASE_PCT: "5"
+        MAX_ALLOWED_DECREASE_PCT: "5"
+        MAX_PROPOSED_PCT: "100"
+        CT_ZERO_ONLY: "true"
+        BULK_UPDATE_BATCH_SIZE: "100"
+        BULK_JOB_TIMEOUT_S: "300"
+        MINIMUM_FLOOR_CENTS: "5"
+        GENERATE_CHUNK_SIZE: "2000"
+        CARDTRADER_JWT: !If [HasJwt, !Ref CardTraderJwt, ""]
+
+Resources:
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRuns
+            Status: Enabled
+            Prefix: runs/
+            ExpirationInDays: 90
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pricing_run_id
+          AttributeType: S
+        - AttributeName: batch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pricing_run_id
+          KeyType: HASH
+        - AttributeName: batch_id
+          KeyType: RANGE
+
+  # Create log groups before first invoke so retention applies (default is never expire).
+  PrepareLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-prepare"
+      RetentionInDays: 90
+
+  PlanChunkLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-plan-chunk"
+      RetentionInDays: 90
+
+  MergeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-merge"
+      RetentionInDays: 90
+
+  ApplyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-apply"
+      RetentionInDays: 90
+
+  PrepareFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: PrepareLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-prepare"
+      CodeUri: src/
+      Handler: cardtrader_inventory.aws.handlers.prepare_handler
+      Description: Export + validate; write listings/manifest for Map chunks
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: CardTraderInventory/Reprice
+
+  PlanChunkFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: PlanChunkLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-plan-chunk"
+      CodeUri: src/
+      Handler: cardtrader_inventory.aws.handlers.plan_chunk_handler
+      Description: Marketplace fetch + plan rows for one fetch-key chunk
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+
+  MergeFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: MergeLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-merge"
+      CodeUri: src/
+      Handler: cardtrader_inventory.aws.handlers.merge_handler
+      Description: Merge chunk plans, safety gate, write summary/plan.jsonl, metrics
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: CardTraderInventory/Reprice
+
+  ApplyFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ApplyLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-apply"
+      CodeUri: src/
+      Handler: cardtrader_inventory.aws.handlers.apply_handler
+      Description: LIVE bulk_update with stale checks + DynamoDB idempotency
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: CardTraderInventory/Reprice
+
+  RepriceStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::StackName}-reprice"
+      Type: STANDARD
+      Definition:
+        Comment: Prepare → sequential Map plan chunks → Merge/Safety → optional LIVE Apply
+        StartAt: Prepare
+        States:
+          Prepare:
+            Type: Task
+            Resource: !GetAtt PrepareFunction.Arn
+            ResultPath: "$"
+            Next: HasChunks
+            Retry:
+              - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2
+          HasChunks:
+            Type: Choice
+            Choices:
+              - Variable: "$.error"
+                IsPresent: true
+                Next: PrepareFailed
+            Default: PlanChunks
+          PrepareFailed:
+            Type: Fail
+            Error: PrepareFailed
+            Cause: Export/validate failed; see Prepare Lambda logs and RepriceError metric
+          PlanChunks:
+            Type: Map
+            ItemsPath: "$.chunks"
+            MaxConcurrency: 1
+            ResultPath: "$.chunk_results"
+            Iterator:
+              StartAt: PlanChunk
+              States:
+                PlanChunk:
+                  Type: Task
+                  Resource: !GetAtt PlanChunkFunction.Arn
+                  End: true
+                  Retry:
+                    - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+                      IntervalSeconds: 5
+                      MaxAttempts: 2
+                      BackoffRate: 2
+            Next: Merge
+          Merge:
+            Type: Task
+            Resource: !GetAtt MergeFunction.Arn
+            ResultPath: "$"
+            Next: SafetyGate
+            Retry:
+              - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2
+          SafetyGate:
+            Type: Choice
+            Choices:
+              - Variable: "$.safety_ok"
+                BooleanEquals: true
+                Next: ModeGate
+            Default: PlanSafetyFailed
+          ModeGate:
+            Type: Choice
+            Choices:
+              - Variable: "$.mode"
+                StringEquals: LIVE
+                Next: Apply
+            Default: Finalize
+          Apply:
+            Type: Task
+            Resource: !GetAtt ApplyFunction.Arn
+            ResultPath: "$.apply"
+            Next: Finalize
+            Retry:
+              - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2
+          Finalize:
+            Type: Succeed
+          PlanSafetyFailed:
+            Type: Fail
+            Error: PlanSafetyCheckFailed
+            Cause: safety_ok was false; inspect S3 summary if present
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PrepareFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PlanChunkFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MergeFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ApplyFunction
+      Events:
+        ScheduledLive:
+          Type: Schedule
+          Properties:
+            Description: LIVE reprice every hour
+            Schedule: rate(1 hour)
+            # Use State (not Enabled): SAM does not resolve !If on Enabled.
+            State: !If [ScheduleIsEnabled, ENABLED, DISABLED]
+            Input: '{"mode":"LIVE"}'
+
+  RepriceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-reprice"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0, "y": 0, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "## CardTrader reprice\nCustom metrics + Lambda duration/errors (built-in)."
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 1, "width": 12, "height": 6,
+              "properties": {
+                "title": "End-to-end run time (minutes)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "yAxis": { "left": { "label": "minutes", "showUnits": false, "min": 0 } },
+                "metrics": [
+                  [ "AWS/States", "ExecutionTime", "StateMachineArn", "${RepriceStateMachine}", { "id": "et_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ { "expression": "et_ms/60000", "label": "E2E (min)", "id": "et_min", "color": "#1f77b4", "period": 60 } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 1, "width": 12, "height": 6,
+              "properties": {
+                "title": "CardsInInventory (copies)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "CardsInInventory", { "color": "#17becf" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 7, "width": 12, "height": 6,
+              "properties": {
+                "title": "InventoryValue (EUR, planned catalog)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "InventoryValue", { "color": "#2ca02c" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 7, "width": 6, "height": 6,
+              "properties": {
+                "title": "PriceUpdatesApplied (LIVE)",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "PriceUpdatesApplied", { "color": "#9467bd" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 18, "y": 7, "width": 6, "height": 6,
+              "properties": {
+                "title": "RepriceError",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "RepriceError", { "color": "#d62728" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 13, "width": 8, "height": 5,
+              "properties": {
+                "title": "Lambda duration (minutes)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "yAxis": { "left": { "label": "minutes", "showUnits": false, "min": 0 } },
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${PrepareFunction}", { "id": "prep_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${PlanChunkFunction}", { "id": "chunk_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${MergeFunction}", { "id": "merge_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${ApplyFunction}", { "id": "apply_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ { "expression": "prep_ms/60000", "label": "Prepare (min)", "id": "prep_min", "color": "#17becf", "period": 60 } ],
+                  [ { "expression": "chunk_ms/60000", "label": "PlanChunk (min)", "id": "chunk_min", "color": "#1f77b4", "period": 60 } ],
+                  [ { "expression": "merge_ms/60000", "label": "Merge (min)", "id": "merge_min", "color": "#2ca02c", "period": 60 } ],
+                  [ { "expression": "apply_ms/60000", "label": "Apply (min)", "id": "apply_min", "color": "#ff7f0e", "period": 60 } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 13, "width": 8, "height": 5,
+              "properties": {
+                "title": "Lambda errors",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${PrepareFunction}", { "color": "#d62728" } ],
+                  [ ".", ".", ".", "${PlanChunkFunction}", { "color": "#ff9896" } ],
+                  [ ".", ".", ".", "${MergeFunction}", { "color": "#e377c2" } ],
+                  [ ".", ".", ".", "${ApplyFunction}", { "color": "#c49c94" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 13, "width": 8, "height": 5,
+              "properties": {
+                "title": "Step Functions failed executions",
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/States", "ExecutionsFailed", "StateMachineArn", "${RepriceStateMachine}", { "color": "#d62728" } ]
+                ]
+              }
+            }
+          ]
+        }
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-reprice-alarms"
+      DisplayName: !Sub "${AWS::StackName} reprice alarms"
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  RepriceErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-reprice-error"
+      AlarmDescription: Custom RepriceError >= 1 (plan/apply failure flag)
+      Namespace: CardTraderInventory/Reprice
+      MetricName: RepriceError
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  ExecutionsFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-sfn-failed"
+      AlarmDescription: Step Functions ExecutionsFailed >= 1
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref RepriceStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  InventoryValueChangeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-inventory-value-change"
+      AlarmDescription: !Sub >-
+        |InventoryValue| hourly change >= ${InventoryChangeAlarmPct}% vs previous sample,
+        with no PriceUpdatesApplied and CardsInInventory change < 10% (unexpected value swing)
+      EvaluationPeriods: 1
+      Threshold: !Ref InventoryChangeAlarmPct
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: inv
+          MetricStat:
+            Metric:
+              Namespace: CardTraderInventory/Reprice
+              MetricName: InventoryValue
+            Period: 3600
+            Stat: Maximum
+          ReturnData: false
+        - Id: cards
+          MetricStat:
+            Metric:
+              Namespace: CardTraderInventory/Reprice
+              MetricName: CardsInInventory
+            Period: 3600
+            Stat: Maximum
+          ReturnData: false
+        - Id: applied
+          MetricStat:
+            Metric:
+              Namespace: CardTraderInventory/Reprice
+              MetricName: PriceUpdatesApplied
+            Period: 3600
+            Stat: Sum
+          ReturnData: false
+        - Id: inv_pct
+          Expression: IF((inv-DIFF(inv))>0,ABS(DIFF(inv)/(inv-DIFF(inv))*100),0)
+          Label: InventoryValueAbsChangePct
+          ReturnData: false
+        - Id: cards_pct
+          Expression: IF((cards-DIFF(cards))>0,ABS(DIFF(cards)/(cards-DIFF(cards))*100),0)
+          Label: CardsInInventoryAbsChangePct
+          ReturnData: false
+        - Id: signal
+          # Page when catalog € moved a lot but we didn't apply prices and stock size barely moved.
+          Expression: IF(FILL(applied,0)<1 AND cards_pct<10, inv_pct, 0)
+          Label: UnexpectedInventoryValueChangePct
+          ReturnData: true
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-errors"
+      AlarmDescription: Any Prepare/PlanChunk/Merge/Apply Lambda Errors >= 1
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: prep
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref PrepareFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: chunk
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref PlanChunkFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: merge
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref MergeFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: apply
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref ApplyFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: total
+          Expression: FILL(prep,0)+FILL(chunk,0)+FILL(merge,0)+FILL(apply,0)
+          Label: LambdaErrorsTotal
+          ReturnData: true
+      AlarmActions:
+        - !Ref AlarmTopic
+
+  LambdaNearTimeoutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-near-timeout"
+      AlarmDescription: !Sub "Any reprice Lambda Duration max >= ${LambdaDurationAlarmMs} ms (headroom before 900s timeout)"
+      EvaluationPeriods: 1
+      Threshold: !Ref LambdaDurationAlarmMs
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: prep
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Duration
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref PrepareFunction
+            Period: 300
+            Stat: Maximum
+          ReturnData: false
+        - Id: chunk
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Duration
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref PlanChunkFunction
+            Period: 300
+            Stat: Maximum
+          ReturnData: false
+        - Id: merge
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Duration
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref MergeFunction
+            Period: 300
+            Stat: Maximum
+          ReturnData: false
+        - Id: apply
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Duration
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref ApplyFunction
+            Period: 300
+            Stat: Maximum
+          ReturnData: false
+        - Id: slowest
+          Expression: MAX([FILL(prep,0),FILL(chunk,0),FILL(merge,0),FILL(apply,0)])
+          Label: MaxLambdaDurationMs
+          ReturnData: true
+      AlarmActions:
+        - !Ref AlarmTopic
+
+Outputs:
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref RepriceStateMachine
+  ArtifactsBucket:
+    Description: S3 bucket for plan/apply artifacts
+    Value: !Ref ArtifactsBucket
+  PrepareFunctionName:
+    Description: Prepare Lambda name
+    Value: !Ref PrepareFunction
+  PlanChunkFunctionName:
+    Description: Plan-chunk Lambda name
+    Value: !Ref PlanChunkFunction
+  MergeFunctionName:
+    Description: Merge Lambda name
+    Value: !Ref MergeFunction
+  ApplyFunctionName:
+    Description: Apply Lambda name
+    Value: !Ref ApplyFunction
+  IdempotencyTableName:
+    Description: DynamoDB table for apply batch idempotency
+    Value: !Ref IdempotencyTable
+  DashboardName:
+    Description: CloudWatch dashboard name
+    Value: !Ref RepriceDashboard
+  AlarmTopicArn:
+    Description: SNS topic for reprice alarms
+    Value: !Ref AlarmTopic
