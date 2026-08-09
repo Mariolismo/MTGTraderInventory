@@ -45,12 +45,36 @@ Flow: EventBridge → Prepare → Map(PlanChunk, concurrency 1) → Merge → Ap
 
 ```powershell
 sam build
-sam deploy --parameter-overrides "ScheduleEnabled=true"
+sam deploy   # uses samconfig.toml (ScheduleEnabled, AlarmEmail, …)
 ```
 
-Disable schedule: `ScheduleEnabled=false`.
+Disable schedule: `ScheduleEnabled=false` in `parameter_overrides` (or pass it on the CLI).
 
-Set `CARDTRADER_JWT` on all four Lambdas (console preferred; or `CardTraderJwt` deploy param once — don’t leave it in `samconfig.toml`).
+### CardTrader JWT on AWS (easy to miss)
+
+`$env:CARDTRADER_JWT` is **local only**. It does **not** update Lambda.
+
+Set the same Bearer token on **all four** functions:
+
+- `${StackName}-prepare`
+- `${StackName}-plan-chunk`
+- `${StackName}-merge`
+- `${StackName}-apply`
+
+**Preferred:** AWS Console → Lambda → each function → Configuration → Environment variables → `CARDTRADER_JWT`.
+
+**One-shot via deploy** (do not commit the token; omit it from `samconfig.toml`):
+
+```powershell
+sam deploy --parameter-overrides `
+  "ScheduleEnabled=true" `
+  "AlarmEmail=you@example.com" `
+  "CardTraderJwt=YOUR_TOKEN"
+```
+
+If you deploy **without** `CardTraderJwt`, the template sets `CARDTRADER_JWT=""` and can **wipe** a token you previously set in the console. After rotating a CT app token, update AWS explicitly (all four Lambdas) or redeploy with `CardTraderJwt=…`.
+
+`application_disabled` / HTTP 403 from CardTrader means the API app behind the JWT was disabled — fix/recreate the app in CardTrader, then refresh AWS env vars.
 
 ### Start a run
 
@@ -81,7 +105,9 @@ sam deploy --parameter-overrides "ScheduleEnabled=true" "AlarmEmail=you@example.
 # optional: "InventoryChangeAlarmPct=20" "LambdaDurationAlarmMs=720000"
 ```
 
-Confirm the SNS subscription email AWS sends. Alarm-only mail (no OK spam).
+Confirm the SNS subscription email AWS sends **before** you expect alarm mail. Until you click the confirm link, the topic subscription stays **Pending** and **no alarm emails are delivered**.
+
+Alarm-only mail (no OK spam).
 
 | Alarm | Fires when |
 |-------|------------|
