@@ -5,10 +5,12 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import random
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from cardtrader_inventory.config import API_BASE_URL, PricingPolicy
@@ -20,6 +22,13 @@ logger = logging.getLogger(__name__)
 # CardTrader documents GET /jobs/:uuid at max 1 request/second.
 _JOB_POLL_MIN_INTERVAL_S = 1.05
 
+# Transient upstream / edge errors — retry with exponential backoff + jitter.
+_RETRYABLE_HTTP_STATUS = frozenset({429, 502, 503, 504})
+# Safe to retry freely (no partial side effects).
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD"})
+# Mutations: only retry clear rate-limit (request usually not accepted).
+_MUTATION_RETRYABLE_STATUS = frozenset({429})
+
 
 def _decode_http_body(raw: bytes, headers: Any) -> str:
     """Decode response bytes; honor Content-Encoding: gzip when present."""
@@ -29,6 +38,57 @@ def _decode_http_body(raw: bytes, headers: Any) -> str:
     if encoding == "gzip" and raw:
         raw = gzip.decompress(raw)
     return raw.decode("utf-8", errors="replace")
+
+
+def _parse_retry_after_s(headers: Any) -> float | None:
+    """Parse Retry-After as delay-seconds or HTTP-date. None if missing/invalid."""
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+        return max(0.0, when.timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _retry_allowed(*, method: str, status: int | None, is_network: bool) -> bool:
+    """GET/HEAD: retry transient HTTP + network. Mutations: 429 only (no network)."""
+    method_u = (method or "GET").upper()
+    if method_u in _IDEMPOTENT_METHODS:
+        if is_network:
+            return True
+        return status in _RETRYABLE_HTTP_STATUS
+    # POST/PUT/PATCH/DELETE — avoid duplicating bulk jobs on 503 mid-accept.
+    if is_network:
+        return False
+    return status in _MUTATION_RETRYABLE_STATUS
+
+
+def _backoff_sleep_s(
+    attempt: int,
+    *,
+    base_s: float,
+    max_s: float,
+    retry_after_s: float | None = None,
+) -> float:
+    """Full jitter: uniform(0, min(cap, base * 2^attempt)), at least Retry-After if set."""
+    base = max(0.1, float(base_s))
+    cap = max(base, float(max_s))
+    exp_cap = min(cap, base * (2**attempt))
+    sleep_s = random.uniform(0.0, exp_cap)
+    if retry_after_s is not None:
+        sleep_s = max(sleep_s, min(cap, float(retry_after_s)))
+    return sleep_s
 
 
 class CardTraderError(RuntimeError):
@@ -105,8 +165,9 @@ class CardTraderClient:
         *,
         timeout: float,
         rate_limit: bool,
-        allow_429_retry: bool = True,
+        attempt: int = 0,
     ) -> tuple[str, int]:
+        method = req.get_method()
         if rate_limit:
             self._limiter.acquire()
         try:
@@ -117,23 +178,68 @@ class CardTraderClient:
                 )
         except urllib.error.HTTPError as exc:
             raw = _decode_http_body(exc.read(), exc.headers)
-            if exc.code == 429 and rate_limit and allow_429_retry:
-                logger.warning("HTTP 429 from CardTrader; sleeping 1s and retrying once")
-                time.sleep(1.0)
+            max_retries = max(0, int(self._policy.ct_http_max_retries))
+            if (
+                attempt < max_retries
+                and _retry_allowed(method=method, status=exc.code, is_network=False)
+            ):
+                retry_after = _parse_retry_after_s(exc.headers)
+                sleep_s = _backoff_sleep_s(
+                    attempt,
+                    base_s=self._policy.ct_http_retry_base_s,
+                    max_s=self._policy.ct_http_retry_max_s,
+                    retry_after_s=retry_after,
+                )
+                logger.warning(
+                    "HTTP %s from CardTrader for %s %s; retry %s/%s in %.1fs",
+                    exc.code,
+                    method,
+                    req.full_url,
+                    attempt + 1,
+                    max_retries,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
                 return self._send(
                     req,
                     timeout=timeout,
                     rate_limit=rate_limit,
-                    allow_429_retry=False,
+                    attempt=attempt + 1,
                 )
             raise CardTraderError(
-                f"HTTP {exc.code} for {req.get_method()} {req.full_url}: {raw[:300]}",
+                f"HTTP {exc.code} for {method} {req.full_url}: {raw[:300]}",
                 status=exc.code,
                 body=raw,
             ) from exc
         except urllib.error.URLError as exc:
+            max_retries = max(0, int(self._policy.ct_http_max_retries))
+            if attempt < max_retries and _retry_allowed(
+                method=method, status=None, is_network=True
+            ):
+                sleep_s = _backoff_sleep_s(
+                    attempt,
+                    base_s=self._policy.ct_http_retry_base_s,
+                    max_s=self._policy.ct_http_retry_max_s,
+                )
+                logger.warning(
+                    "Network error from CardTrader for %s %s (%s); "
+                    "retry %s/%s in %.1fs",
+                    method,
+                    req.full_url,
+                    exc.reason,
+                    attempt + 1,
+                    max_retries,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
+                return self._send(
+                    req,
+                    timeout=timeout,
+                    rate_limit=rate_limit,
+                    attempt=attempt + 1,
+                )
             raise CardTraderError(
-                f"Network error for {req.get_method()} {req.full_url}: {exc.reason}"
+                f"Network error for {method} {req.full_url}: {exc.reason}"
             ) from exc
 
     def export_products(self) -> list[Listing]:

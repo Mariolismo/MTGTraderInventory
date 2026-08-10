@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from cardtrader_inventory.config import SENTINEL_PRICE_CENTS
 from cardtrader_inventory.ct_client import CardTraderClient
 from cardtrader_inventory.models import Listing
 
@@ -238,9 +239,15 @@ def aggregate_ct_listings(
     expansion_codes: dict[int, str],
     *,
     ignore_condition: bool = False,
-) -> tuple[dict[MatchKey, AggregateRow], int]:
+) -> tuple[dict[MatchKey, AggregateRow], int, int]:
+    """Aggregate CT listings by match key.
+
+    Returns ``(by_key, missing_scryfall_copies, sentinel_copies_excluded_from_value)``.
+    Sentinel list prices (≥ SENTINEL_PRICE_CENTS) are omitted from ``value_cents``.
+    """
     by_key: dict[MatchKey, AggregateRow] = defaultdict(AggregateRow)
     missing_scryfall = 0
+    sentinel_copies = 0
     for listing in listings:
         scryfall = normalize_scryfall_id(blueprint_scryfall.get(listing.blueprint_id, ""))
         if not scryfall:
@@ -269,8 +276,11 @@ def aggregate_ct_listings(
         agg.scryfall_id = scryfall
         agg.conditions.add(normalize_condition(listing.condition))
         agg.listing_ids.append(listing.id)
-        agg.value_cents += listing.price_cents * listing.quantity
-    return dict(by_key), missing_scryfall
+        if listing.price_cents >= SENTINEL_PRICE_CENTS:
+            sentinel_copies += max(1, listing.quantity)
+        else:
+            agg.value_cents += listing.price_cents * listing.quantity
+    return dict(by_key), missing_scryfall, sentinel_copies
 
 
 def _diff_from_sides(
@@ -318,6 +328,7 @@ def compare_aggregates(
     ignore_condition: bool,
     csv_missing_scryfall: int = 0,
     ct_missing_scryfall: int = 0,
+    ct_sentinel_copies: int = 0,
 ) -> CompareResult:
     csv_keys = set(csv_by_key)
     ct_keys = set(ct_by_key)
@@ -352,6 +363,7 @@ def compare_aggregates(
     else:
         match_key = " + ".join(match_parts + ["condition"]) + " [EU<->CT grade map]"
 
+    ct_value_cents = sum(r.value_cents for r in ct_by_key.values())
     summary = {
         "csv_unique_keys": len(csv_by_key),
         "csv_copies": sum(r.qty for r in csv_by_key.values()),
@@ -367,6 +379,8 @@ def compare_aggregates(
         "copies_qty_mismatch_abs": sum(abs(r.delta) for r in qty_mismatch),
         "csv_missing_scryfall_copies": csv_missing_scryfall,
         "ct_missing_scryfall_copies": ct_missing_scryfall,
+        "ct_value_eur_excl_sentinel": round(ct_value_cents / 100.0, 2),
+        "ct_sentinel_copies_excl_from_value": ct_sentinel_copies,
     }
     return CompareResult(
         fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -409,7 +423,7 @@ def compare_manabox_to_ct(
     csv_by_key, csv_missing = load_manabox_csv(
         csv_path, ignore_condition=ignore_condition
     )
-    ct_by_key, ct_missing = aggregate_ct_listings(
+    ct_by_key, ct_missing, ct_sentinel_copies = aggregate_ct_listings(
         listings,
         blueprint_scryfall,
         expansion_codes,
@@ -422,6 +436,7 @@ def compare_manabox_to_ct(
         ignore_condition=ignore_condition,
         csv_missing_scryfall=csv_missing,
         ct_missing_scryfall=ct_missing,
+        ct_sentinel_copies=ct_sentinel_copies,
     )
     result.summary["scryfall_enrich_needed"] = enrich_stats.needed
     result.summary["scryfall_enrich_via_tcgplayer"] = enrich_stats.via_tcgplayer

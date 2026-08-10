@@ -103,11 +103,21 @@ def enrich_blueprint_scryfall(
     stats = ScryfallEnrichStats()
     targets = needed_blueprint_ids if needed_blueprint_ids is not None else set(blueprints)
 
-    for bp_id in sorted(targets):
+    missing = sorted(
+        bp_id
+        for bp_id in targets
+        if (info := blueprints.get(bp_id)) is not None and not info.scryfall_id
+    )
+    logger.info(
+        "Scryfall UID enrich starting: %s blueprints missing scryfall_id "
+        "(~%.0fs if each needs one lookup)",
+        len(missing),
+        len(missing) * _MIN_INTERVAL_S,
+    )
+
+    for index, bp_id in enumerate(missing, start=1):
         info = blueprints.get(bp_id)
         if info is None:
-            continue
-        if info.scryfall_id:
             continue
         stats.needed += 1
 
@@ -117,6 +127,13 @@ def enrich_blueprint_scryfall(
                 info.scryfall_id = resolved
                 info.scryfall_source = "tcgplayer"
                 stats.via_tcgplayer += 1
+                if index == 1 or index % 50 == 0 or index == len(missing):
+                    logger.info(
+                        "Scryfall enrich progress %s/%s (resolved=%s)",
+                        index,
+                        len(missing),
+                        stats.via_tcgplayer + stats.via_cardmarket,
+                    )
                 continue
 
         for cm_id in info.card_market_ids:
@@ -129,6 +146,15 @@ def enrich_blueprint_scryfall(
         else:
             if not info.scryfall_id:
                 stats.still_missing += 1
+
+        if index == 1 or index % 50 == 0 or index == len(missing):
+            logger.info(
+                "Scryfall enrich progress %s/%s (resolved=%s missing=%s)",
+                index,
+                len(missing),
+                stats.via_tcgplayer + stats.via_cardmarket,
+                stats.still_missing,
+            )
 
     logger.info(
         "Scryfall UID enrich: needed=%s via_tcgplayer=%s via_cardmarket=%s still_missing=%s",

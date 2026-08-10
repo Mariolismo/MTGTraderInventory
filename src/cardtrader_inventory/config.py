@@ -184,14 +184,27 @@ class PricingPolicy:
     ct_zero_only: bool = True
     # Market = median of cheapest N; if only 3–4 comps use 3rd-lowest.
     market_median_window: int = 5
-    # Skip if (max-min)/min among market window exceeds this %.
-    max_comp_spread_pct: float = 50.0
-    # Ignore tiny updates: |Δ| must be >= max(min_change_cents, min_change_pct of previous).
-    min_change_cents: int = 5
-    min_change_pct: float = 1.0
+    # Skip if (max-min)/min among market window exceeds this % — but only when
+    # the window's cheapest offer is above comp_spread_min_price_cents (bulk
+    # variance as a ratio is noise below that).
+    max_comp_spread_pct: float = 100.0
+    comp_spread_min_price_cents: int = 500  # €5; ratio gate only if min > this
+    # Dead band: |Δ| must be >= max(min_change_cents, min_change_pct of previous).
+    # Default off — 1¢ undercuts matter; set via env if API churn becomes noisy.
+    min_change_cents: int = 0
+    min_change_pct: float = 0.0
+    # Marketplace comps are buyer-facing (fee included). Target is the seller
+    # list price after stripping fee and undercutting buyer total by this many
+    # cents. 0 = strip fee only (match market buyer total).
+    buyer_total_undercut_cents: int = 1
     # LIVE apply: products per bulk_update call; job wait timeout.
     bulk_update_batch_size: int = 100
     bulk_job_timeout_s: float = 300.0
+    # Transient CT HTTP: retries after the first try (GET/HEAD: 429/502/503/504 +
+    # network; POST mutations: 429 only). Full jitter, capped max delay.
+    ct_http_max_retries: int = 3
+    ct_http_retry_base_s: float = 1.0
+    ct_http_retry_max_s: float = 30.0
 
     def floor_cents_for(self, *, rarity: str, foil: bool) -> tuple[int, str]:
         """Return (floor_cents, policy_key) for a listing's rarity + foil."""
@@ -236,9 +249,14 @@ class PricingPolicy:
             ct_zero_only=_env_str("CT_ZERO_ONLY", "true").lower()
             in {"1", "true", "yes", "y"},
             market_median_window=_env_int("MARKET_MEDIAN_WINDOW", 5),
-            max_comp_spread_pct=_env_float("MAX_COMP_SPREAD_PCT", 50.0),
-            min_change_cents=_env_int("MIN_CHANGE_CENTS", 5),
-            min_change_pct=_env_float("MIN_CHANGE_PCT", 1.0),
+            max_comp_spread_pct=_env_float("MAX_COMP_SPREAD_PCT", 100.0),
+            comp_spread_min_price_cents=_env_int("COMP_SPREAD_MIN_PRICE_CENTS", 500),
+            min_change_cents=_env_int("MIN_CHANGE_CENTS", 0),
+            min_change_pct=_env_float("MIN_CHANGE_PCT", 0.0),
+            buyer_total_undercut_cents=_env_int("BUYER_TOTAL_UNDERCUT_CENTS", 1),
             bulk_update_batch_size=_env_int("BULK_UPDATE_BATCH_SIZE", 100),
             bulk_job_timeout_s=_env_float("BULK_JOB_TIMEOUT_S", 300.0),
+            ct_http_max_retries=_env_int("CT_HTTP_MAX_RETRIES", 3),
+            ct_http_retry_base_s=_env_float("CT_HTTP_RETRY_BASE_S", 1.0),
+            ct_http_retry_max_s=_env_float("CT_HTTP_RETRY_MAX_S", 30.0),
         )

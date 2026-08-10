@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from cardtrader_inventory.buyer_fees import list_from_market_buyer_total
 from cardtrader_inventory.config import PricingPolicy
 from cardtrader_inventory.models import (
     Listing,
@@ -117,7 +118,7 @@ def compute_market_price(
 
     - < min comps → insufficient
     - window = cheapest market_median_window (or all if fewer)
-    - if spread too wide → skip
+    - if window min > comp_spread_min_price_cents and spread too wide → skip
     - if window >= median window → median(window)
     - else (3–4 comps) → 3rd-lowest
     """
@@ -136,13 +137,23 @@ def compute_market_price(
     window = prices[: min(window_n, len(prices))]
     spread = comp_spread_ratio(window)
     max_spread = policy.max_comp_spread_pct / 100.0
-    if spread is not None and spread > max_spread:
+    window_min = min(window) if window else 0
+    # Ratio gate only on non-bulk windows (min strictly above threshold, e.g. €5).
+    apply_spread_gate = window_min > policy.comp_spread_min_price_cents
+    if (
+        apply_spread_gate
+        and spread is not None
+        and spread > max_spread
+    ):
         return MarketSelection(
             market_cents=None,
             method="wide_spread",
             window_size=len(window),
             spread_ratio=spread,
-            detail=f"spread={spread:.2f}>max={max_spread:.2f}",
+            detail=(
+                f"spread={spread:.2f}>max={max_spread:.2f}"
+                f";min={window_min}>{policy.comp_spread_min_price_cents}¢"
+            ),
         )
 
     if len(window) >= policy.market_median_window:
@@ -269,8 +280,20 @@ def price_listing(
         method_tag = selection.detail
 
     is_sentinel = listing.price_cents >= policy.sentinel_price_cents
-    floor_applied = market_price < floor_cents
-    target = max(market_price, floor_cents)
+    # Marketplace comps are buyer-facing (fee included). We propose the seller
+    # list price; CT adds the (+€X.XX) fee later at checkout / in the UI.
+    undercut = max(0, int(policy.buyer_total_undercut_cents))
+    priced, fee_cents, buyer_after = list_from_market_buyer_total(
+        market_price, undercut_cents=undercut
+    )
+    undercut_tag = (
+        f"buyer_undercut={undercut}¢;"
+        f"market_buyer={market_price}→list={priced}+fee={fee_cents}"
+        f"→buyer={buyer_after}"
+    )
+
+    floor_applied = priced < floor_cents
+    target = max(priced, floor_cents)
     proposed, clamp_dec, clamp_inc = apply_clamps(
         listing.price_cents,
         target,
@@ -288,6 +311,8 @@ def price_listing(
     base.initial_price = is_sentinel
 
     parts = [method_tag]
+    if undercut_tag:
+        parts.append(undercut_tag)
     if floor_applied:
         parts.append(f"floor={floor_key}:{floor_cents}")
     if clamp_dec:

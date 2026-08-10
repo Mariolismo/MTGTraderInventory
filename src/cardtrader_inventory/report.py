@@ -7,7 +7,12 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from cardtrader_inventory.config import SENTINEL_PRICE_CENTS
 from cardtrader_inventory.models import PlanAction, PricingPlan
+
+
+def _is_sentinel_price(cents: int) -> bool:
+    return cents >= SENTINEL_PRICE_CENTS
 
 
 @dataclass
@@ -19,7 +24,7 @@ class PlanKpis:
     catalog_copies: int
     increases: int
     decreases: int
-    # qty-weighted unit averages over changed copies
+    # qty-weighted unit averages over changed copies (sentinel unit prices excluded)
     avg_unit_price_before_cents: float | None
     avg_unit_price_after_cents: float | None
     avg_increase_cents: float | None
@@ -30,13 +35,15 @@ class PlanKpis:
     median_change_pct: float | None
     max_increase_pct: float | None
     max_decrease_pct: float | None
-    # qty-weighted: sum(unit_price × quantity)
+    # qty-weighted: sum(unit_price × quantity); sentinel list prices omitted
     changed_value_before_cents: int
     changed_value_after_cents: int
     changed_value_delta_cents: int
     catalog_value_before_cents: int
     catalog_value_after_cents: int
     catalog_value_delta_cents: int
+    sentinel_listings_excluded_from_value: int
+    sentinel_copies_excluded_from_value: int
     # backward-compatible aliases (changed stock only)
     total_value_before_cents: int
     total_value_after_cents: int
@@ -86,21 +93,42 @@ def compute_plan_kpis(plan: PricingPlan) -> PlanKpis:
 
     changed_before = 0
     changed_after = 0
+    avg_before_copies = 0
+    avg_after_copies = 0
+    sentinel_listings = 0
+    sentinel_copies = 0
 
     for row in updates:
         qty = max(1, row.quantity)
         prev = row.previous_price_cents
         new = row.proposed_price_cents or prev
+        prev_sentinel = row.sentinel_clear or _is_sentinel_price(prev)
+        new_sentinel = _is_sentinel_price(new)
         changed_copies += qty
-        changed_before += prev * qty
-        changed_after += new * qty
+
+        if prev_sentinel:
+            sentinel_listings += 1
+            sentinel_copies += qty
+        else:
+            changed_before += prev * qty
+            avg_before_copies += qty
+
+        if not new_sentinel:
+            changed_after += new * qty
+            avg_after_copies += qty
+
         delta = new - prev
         pct = (100.0 * delta / prev) if prev > 0 else 0.0
-        all_change_pcts.append(pct)
         if row.clamp_decrease:
             clamp_dec += 1
         if row.clamp_increase:
             clamp_inc += 1
+
+        # Sentinel clears are not normal +/- moves for averages / max %.
+        if prev_sentinel:
+            continue
+
+        all_change_pcts.append(pct)
         if delta > 0:
             increase_listings += 1
             increase_unit_weights.append((float(delta), qty))
@@ -109,7 +137,7 @@ def compute_plan_kpis(plan: PricingPlan) -> PlanKpis:
             decrease_listings += 1
             decrease_unit_weights.append((float(-delta), qty))
             decrease_pct_weights.append((-pct, qty))
-            if not row.sentinel_clear and prev > 0 and (-pct) > 5.0 + 1e-9:
+            if prev > 0 and (-pct) > 5.0 + 1e-9:
                 decreases_over_max += 1
 
     catalog_before = changed_before
@@ -119,13 +147,17 @@ def compute_plan_kpis(plan: PricingPlan) -> PlanKpis:
         qty = max(1, row.quantity)
         prev = row.previous_price_cents
         catalog_copies += qty
+        if _is_sentinel_price(prev):
+            sentinel_listings += 1
+            sentinel_copies += qty
+            continue
         catalog_before += prev * qty
         catalog_after += prev * qty
 
     avg_before = (
-        (changed_before / changed_copies) if changed_copies else None
+        (changed_before / avg_before_copies) if avg_before_copies else None
     )
-    avg_after = (changed_after / changed_copies) if changed_copies else None
+    avg_after = (changed_after / avg_after_copies) if avg_after_copies else None
 
     return PlanKpis(
         changed_listings=len(updates),
@@ -154,6 +186,8 @@ def compute_plan_kpis(plan: PricingPlan) -> PlanKpis:
         catalog_value_before_cents=catalog_before,
         catalog_value_after_cents=catalog_after,
         catalog_value_delta_cents=catalog_after - catalog_before,
+        sentinel_listings_excluded_from_value=sentinel_listings,
+        sentinel_copies_excluded_from_value=sentinel_copies,
         total_value_before_cents=changed_before,
         total_value_after_cents=changed_after,
         net_value_delta_cents=changed_after - changed_before,
@@ -171,8 +205,12 @@ def iter_change_rows(plan: PricingPlan) -> list[dict]:
         qty = max(1, row.quantity)
         prev = row.previous_price_cents
         new = row.proposed_price_cents
+        prev_sentinel = row.sentinel_clear or _is_sentinel_price(prev)
+        new_sentinel = _is_sentinel_price(new)
         delta = new - prev
-        pct = (100.0 * delta / prev) if prev > 0 else 0.0
+        pct = (100.0 * delta / prev) if prev > 0 and not prev_sentinel else None
+        before_cents = 0 if prev_sentinel else prev * qty
+        after_cents = 0 if new_sentinel else new * qty
         rows.append(
             {
                 "listing_id": row.listing_id,
@@ -185,19 +223,25 @@ def iter_change_rows(plan: PricingPlan) -> list[dict]:
                 "new_price_eur": round(new / 100.0, 2),
                 "market_eur": round((row.market_price_cents or 0) / 100.0, 2),
                 "delta_cents": delta,
-                "delta_pct": round(pct, 2),
-                "line_value_before_eur": round(prev * qty / 100.0, 2),
-                "line_value_after_eur": round(new * qty / 100.0, 2),
-                "line_value_delta_eur": round((new - prev) * qty / 100.0, 2),
+                "delta_pct": None if pct is None else round(pct, 2),
+                # Money columns omit sentinel list prices (before=0 on clear).
+                "line_value_before_eur": round(before_cents / 100.0, 2),
+                "line_value_after_eur": round(after_cents / 100.0, 2),
+                "line_value_delta_eur": round((after_cents - before_cents) / 100.0, 2),
                 "market_cents": row.market_price_cents,
                 "comparable_count": row.comparable_count,
                 "clamp_decrease": row.clamp_decrease,
                 "clamp_increase": row.clamp_increase,
-                "sentinel_clear": row.sentinel_clear,
+                "sentinel_clear": row.sentinel_clear or prev_sentinel,
                 "reason": row.reason,
             }
         )
-    rows.sort(key=lambda r: r["delta_pct"])
+    rows.sort(
+        key=lambda r: (
+            r["sentinel_clear"],
+            r["delta_pct"] if r["delta_pct"] is not None else 0.0,
+        )
+    )
     return rows
 
 
@@ -258,12 +302,14 @@ def format_kpi_table(kpis: PlanKpis) -> str:
         return f"{value:.2f}%"
 
     lines = [
-        "--- Plan KPIs (money = unit_price * quantity) ---",
+        "--- Plan KPIs (money = unit_price * quantity; sentinel excluded) ---",
         f"changed_listings:       {kpis.changed_listings}",
         f"changed_copies:         {kpis.changed_copies}",
         f"unchanged_listings:     {kpis.unchanged_listings}",
         f"catalog_listings/copies:{kpis.catalog_listings} / {kpis.catalog_copies}",
-        f"increases / decreases:  {kpis.increases} / {kpis.decreases} (listings)",
+        f"sentinel excl. value:   {kpis.sentinel_listings_excluded_from_value} listings / "
+        f"{kpis.sentinel_copies_excluded_from_value} copies",
+        f"increases / decreases:  {kpis.increases} / {kpis.decreases} (listings, non-sentinel)",
         f"avg unit price before:  {eur(kpis.avg_unit_price_before_cents)} (qty-weighted)",
         f"avg unit price after:   {eur(kpis.avg_unit_price_after_cents)} (qty-weighted)",
         f"avg increase (unit):    {eur(kpis.avg_increase_cents)} ({pct(kpis.avg_increase_pct)}) qty-weighted",

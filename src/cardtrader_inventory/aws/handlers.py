@@ -14,7 +14,7 @@ from cardtrader_inventory.apply import (
     update_rows_from_plan,
 )
 from cardtrader_inventory.aws.dynamodb_store import DynamoBatchIdempotencyStore
-from cardtrader_inventory.aws.metrics import put_metrics
+from cardtrader_inventory.aws.metrics import plan_observability_metrics, put_metrics
 from cardtrader_inventory.aws.plan_orchestrate import (
     build_manifest,
     listings_bytes,
@@ -267,11 +267,12 @@ def merge_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     cards_in_inventory = sum(max(1, row.quantity) for row in result.plan.rows)
     inventory_eur = round(result.kpis.catalog_value_after_cents / 100.0, 2)
     put_metrics(
-        {
-            "CardsInInventory": (cards_in_inventory, "Count"),
-            "RepriceError": (0 if result.safety.ok else 1, "Count"),
-            "InventoryValue": (inventory_eur, "None"),
-        }
+        plan_observability_metrics(
+            result.plan,
+            cards_in_inventory=cards_in_inventory,
+            inventory_eur=inventory_eur,
+            safety_ok=result.safety.ok,
+        )
     )
 
     payload = {
@@ -294,7 +295,9 @@ def merge_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "cards_in_inventory": cards_in_inventory,
             "price_updates_proposed": summary.price_updates_proposed,
             "skipped_wide_spread": summary.skipped_wide_spread,
+            "skipped_insufficient_comps": summary.skipped_insufficient_comps,
             "skipped_dead_band": summary.skipped_dead_band,
+            "sentinel_cleared": summary.sentinel_initial_priced,
             "no_change": summary.no_change,
             "inventory_value_eur": inventory_eur,
             "chunk_count": len(chunk_plans),
@@ -347,11 +350,12 @@ def plan_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     cards_in_inventory = sum(max(1, row.quantity) for row in result.plan.rows)
     inventory_eur = round(result.kpis.catalog_value_after_cents / 100.0, 2)
     put_metrics(
-        {
-            "CardsInInventory": (cards_in_inventory, "Count"),
-            "RepriceError": (0 if result.safety.ok else 1, "Count"),
-            "InventoryValue": (inventory_eur, "None"),
-        }
+        plan_observability_metrics(
+            result.plan,
+            cards_in_inventory=cards_in_inventory,
+            inventory_eur=inventory_eur,
+            safety_ok=result.safety.ok,
+        )
     )
     return {
         "pricing_run_id": result.pricing_run_id,
@@ -370,6 +374,9 @@ def plan_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "cards_processed": summary.cards_processed,
             "cards_in_inventory": cards_in_inventory,
             "price_updates_proposed": summary.price_updates_proposed,
+            "skipped_wide_spread": summary.skipped_wide_spread,
+            "skipped_insufficient_comps": summary.skipped_insufficient_comps,
+            "sentinel_cleared": summary.sentinel_initial_priced,
             "inventory_value_eur": inventory_eur,
         },
     }

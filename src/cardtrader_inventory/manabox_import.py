@@ -167,7 +167,14 @@ def build_scryfall_blueprint_index(
         len(exp_ids),
     )
     catalog = client.blueprint_uid_catalog(exp_ids)
-    enrich_blueprint_scryfall(catalog, needed_blueprint_ids=set(catalog))
+    # Only hit Scryfall for CT blueprints that lack scryfall_id (can be slow).
+    missing_scryfall = {
+        bp_id for bp_id, info in catalog.items() if not info.scryfall_id
+    }
+    if missing_scryfall:
+        enrich_blueprint_scryfall(catalog, needed_blueprint_ids=missing_scryfall)
+    else:
+        logger.info("All %s blueprints already have scryfall_id; skipping enrich", len(catalog))
 
     by_scryfall: dict[str, list[BlueprintUids]] = defaultdict(list)
     seen_bp: set[int] = set()
@@ -365,7 +372,12 @@ def plan_from_csv(
     csv_rows = load_csv_cards(csv_path)
     set_codes = {r.set_code for r in csv_rows if r.set_code}
     scryfall_index = build_scryfall_blueprint_index(client, set_codes)
+    logger.info(
+        "Scryfall index ready (%s ids); exporting CT inventory to skip duplicates",
+        len(scryfall_index),
+    )
     listings = client.export_products()
+    logger.info("CT inventory snapshot: %s listings", len(listings))
     existing = inventory_product_keys(listings)
     plan = plan_import(
         csv_rows,

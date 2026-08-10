@@ -48,15 +48,20 @@ Globals:
         MARKETPLACE_MAX_WORKERS: "16"
         MIN_COMPARABLE_OFFERS: "3"
         MARKET_MEDIAN_WINDOW: "5"
-        MAX_COMP_SPREAD_PCT: "50"
-        MIN_CHANGE_CENTS: "5"
-        MIN_CHANGE_PCT: "1"
+        MAX_COMP_SPREAD_PCT: "100"
+        COMP_SPREAD_MIN_PRICE_CENTS: "500"
+        MIN_CHANGE_CENTS: "0"
+        MIN_CHANGE_PCT: "0"
         MAX_DECREASE_PCT: "5"
         MAX_ALLOWED_DECREASE_PCT: "5"
         MAX_PROPOSED_PCT: "100"
         CT_ZERO_ONLY: "true"
+        BUYER_TOTAL_UNDERCUT_CENTS: "1"
         BULK_UPDATE_BATCH_SIZE: "100"
         BULK_JOB_TIMEOUT_S: "300"
+        CT_HTTP_MAX_RETRIES: "3"
+        CT_HTTP_RETRY_BASE_S: "1"
+        CT_HTTP_RETRY_MAX_S: "30"
         MINIMUM_FLOOR_CENTS: "5"
         GENERATE_CHUNK_SIZE: "2000"
         CARDTRADER_JWT: !If [HasJwt, !Ref CardTraderJwt, ""]
@@ -388,7 +393,38 @@ Resources:
             },
             {
               "type": "metric",
-              "x": 0, "y": 13, "width": 8, "height": 5,
+              "x": 0, "y": 13, "width": 12, "height": 6,
+              "properties": {
+                "title": "Skip reasons (plan)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "SkipWideSpread", { "color": "#ff7f0e" } ],
+                  [ ".", "SkipInsufficientComps", { "color": "#8c564b" } ],
+                  [ ".", "PriceUpdatesProposed", { "color": "#1f77b4" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 13, "width": 12, "height": 6,
+              "properties": {
+                "title": "Sentinel (cleared vs remaining)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 60,
+                "view": "timeSeries",
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "SentinelCleared", { "color": "#2ca02c" } ],
+                  [ ".", "SentinelRemaining", { "color": "#d62728" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 19, "width": 8, "height": 5,
               "properties": {
                 "title": "Lambda duration (minutes)",
                 "region": "${AWS::Region}",
@@ -408,7 +444,7 @@ Resources:
             },
             {
               "type": "metric",
-              "x": 8, "y": 13, "width": 8, "height": 5,
+              "x": 8, "y": 19, "width": 8, "height": 5,
               "properties": {
                 "title": "Lambda errors",
                 "region": "${AWS::Region}",
@@ -425,7 +461,7 @@ Resources:
             },
             {
               "type": "metric",
-              "x": 16, "y": 13, "width": 8, "height": 5,
+              "x": 16, "y": 19, "width": 8, "height": 5,
               "properties": {
                 "title": "Step Functions failed executions",
                 "region": "${AWS::Region}",
@@ -458,15 +494,18 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-reprice-error"
-      AlarmDescription: Custom RepriceError >= 1 (plan/apply failure flag)
+      AlarmDescription: >-
+        Custom RepriceError >= 1 on at least 3 of the last 5 hourly samples.
+        A single failed run does not page. Quiet periods keep state (ignore).
       Namespace: CardTraderInventory/Reprice
       MetricName: RepriceError
       Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
+      Period: 3600
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: ignore
       AlarmActions:
         - !Ref AlarmTopic
 
@@ -474,18 +513,21 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-sfn-failed"
-      AlarmDescription: Step Functions ExecutionsFailed >= 1
+      AlarmDescription: >-
+        Step Functions ExecutionsFailed >= 1 on at least 3 of the last 5 hourly
+        samples. A single failed run (e.g. one CT 503) does not page.
       Namespace: AWS/States
       MetricName: ExecutionsFailed
       Dimensions:
         - Name: StateMachineArn
           Value: !Ref RepriceStateMachine
       Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
+      Period: 3600
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: ignore
       AlarmActions:
         - !Ref AlarmTopic
 
@@ -545,11 +587,15 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-lambda-errors"
-      AlarmDescription: Any Prepare/PlanChunk/Merge/Apply Lambda Errors >= 1
-      EvaluationPeriods: 1
+      AlarmDescription: >-
+        Any Prepare/PlanChunk/Merge/Apply Lambda Errors >= 1 on at least 3 of
+        the last 5 hourly samples. A single failed invoke does not page.
+        Quiet periods keep ALARM state (TreatMissingData=ignore, no FILL).
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: ignore
       Metrics:
         - Id: prep
           MetricStat:
@@ -559,7 +605,7 @@ Resources:
               Dimensions:
                 - Name: FunctionName
                   Value: !Ref PrepareFunction
-            Period: 300
+            Period: 3600
             Stat: Sum
           ReturnData: false
         - Id: chunk
@@ -570,7 +616,7 @@ Resources:
               Dimensions:
                 - Name: FunctionName
                   Value: !Ref PlanChunkFunction
-            Period: 300
+            Period: 3600
             Stat: Sum
           ReturnData: false
         - Id: merge
@@ -581,7 +627,7 @@ Resources:
               Dimensions:
                 - Name: FunctionName
                   Value: !Ref MergeFunction
-            Period: 300
+            Period: 3600
             Stat: Sum
           ReturnData: false
         - Id: apply
@@ -592,11 +638,11 @@ Resources:
               Dimensions:
                 - Name: FunctionName
                   Value: !Ref ApplyFunction
-            Period: 300
+            Period: 3600
             Stat: Sum
           ReturnData: false
         - Id: total
-          Expression: FILL(prep,0)+FILL(chunk,0)+FILL(merge,0)+FILL(apply,0)
+          Expression: prep+chunk+merge+apply
           Label: LambdaErrorsTotal
           ReturnData: true
       AlarmActions:
@@ -606,11 +652,14 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-lambda-near-timeout"
-      AlarmDescription: !Sub "Any reprice Lambda Duration max >= ${LambdaDurationAlarmMs} ms (headroom before 900s timeout)"
+      AlarmDescription: !Sub >-
+        Any reprice Lambda Duration max >= ${LambdaDurationAlarmMs} ms
+        (headroom before 900s timeout). No FILL-to-zero; quiet periods keep
+        prior state (TreatMissingData=ignore).
       EvaluationPeriods: 1
       Threshold: !Ref LambdaDurationAlarmMs
       ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: ignore
       Metrics:
         - Id: prep
           MetricStat:
@@ -657,12 +706,11 @@ Resources:
             Stat: Maximum
           ReturnData: false
         - Id: slowest
-          Expression: MAX([FILL(prep,0),FILL(chunk,0),FILL(merge,0),FILL(apply,0)])
+          Expression: MAX([prep,chunk,merge,apply])
           Label: MaxLambdaDurationMs
           ReturnData: true
       AlarmActions:
         - !Ref AlarmTopic
-
 Outputs:
   StateMachineArn:
     Description: Step Functions state machine ARN

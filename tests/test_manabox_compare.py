@@ -32,12 +32,13 @@ def _listing(
     expansion_id: int,
     qty: int = 1,
     language: str = "en",
+    price_cents: int = 100,
 ) -> Listing:
     return Listing(
         id=listing_id,
         blueprint_id=blueprint_id,
         quantity=qty,
-        price_cents=100,
+        price_cents=price_cents,
         condition=condition,
         language=language,
         foil=foil,
@@ -114,12 +115,13 @@ class CompareScryfallTests(unittest.TestCase):
             )
         ]
         # CT expansion code deliberately wrong/different from ManaBox ECC
-        ct_by, unresolved = aggregate_ct_listings(
+        ct_by, unresolved, sentinel_copies = aggregate_ct_listings(
             listings,
             blueprint_scryfall={365345: scryfall},
             expansion_codes={4329: "CECC"},
         )
         self.assertEqual(unresolved, 0)
+        self.assertEqual(sentinel_copies, 0)
 
         result = compare_aggregates(
             csv_by,
@@ -167,11 +169,12 @@ class CompareScryfallTests(unittest.TestCase):
                 qty=3,
             ),
         ]
-        ct_by, _ = aggregate_ct_listings(
+        ct_by, _, sentinel_copies = aggregate_ct_listings(
             listings,
             blueprint_scryfall={10: tla, 20: tdm},
             expansion_codes={1: "TLA", 2: "TDM"},
         )
+        self.assertEqual(sentinel_copies, 0)
         result = compare_aggregates(
             csv_by, ct_by, csv_path=str(path), ignore_condition=False
         )
@@ -182,6 +185,50 @@ class CompareScryfallTests(unittest.TestCase):
         self.assertEqual(mismatch.scryfall_id, tdm)
         self.assertEqual(mismatch.csv_qty, 4)
         self.assertEqual(mismatch.ct_qty, 3)
+
+    def test_sentinel_prices_excluded_from_ct_value(self) -> None:
+        scryfall = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        listings = [
+            _listing(
+                listing_id=1,
+                blueprint_id=10,
+                name="Normal",
+                cn="1",
+                foil=False,
+                condition="Near Mint",
+                expansion_id=1,
+                qty=2,
+                price_cents=500,
+            ),
+            _listing(
+                listing_id=2,
+                blueprint_id=20,
+                name="Sentinel",
+                cn="2",
+                foil=False,
+                condition="Near Mint",
+                expansion_id=1,
+                qty=3,
+                price_cents=999_999,
+            ),
+        ]
+        ct_by, missing, sentinel_copies = aggregate_ct_listings(
+            listings,
+            blueprint_scryfall={10: scryfall, 20: "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"},
+            expansion_codes={1: "TST"},
+        )
+        self.assertEqual(missing, 0)
+        self.assertEqual(sentinel_copies, 3)
+        self.assertEqual(sum(r.value_cents for r in ct_by.values()), 1000)
+        result = compare_aggregates(
+            {},
+            ct_by,
+            csv_path="n/a",
+            ignore_condition=False,
+            ct_sentinel_copies=sentinel_copies,
+        )
+        self.assertEqual(result.summary["ct_value_eur_excl_sentinel"], 10.0)
+        self.assertEqual(result.summary["ct_sentinel_copies_excl_from_value"], 3)
 
 
 class UidEnrichTests(unittest.TestCase):

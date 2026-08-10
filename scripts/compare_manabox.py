@@ -87,6 +87,11 @@ def _print_summary(result) -> None:
         f"qty_mismatch={s['qty_mismatch']} "
         f"only_csv={s['only_in_csv']} only_ct={s['only_on_ct']}"
     )
+    if s.get("ct_value_eur_excl_sentinel") is not None:
+        print(
+            f"CT value (excl sentinel): €{s['ct_value_eur_excl_sentinel']:.2f} "
+            f"(sentinel copies excl={s.get('ct_sentinel_copies_excl_from_value', 0)})"
+        )
     if s.get("csv_missing_scryfall_copies") or s.get("ct_missing_scryfall_copies"):
         print(
             f"warning: missing scryfall copies "

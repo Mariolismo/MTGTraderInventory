@@ -111,11 +111,15 @@ Alarm-only mail (no OK spam).
 
 | Alarm | Fires when |
 |-------|------------|
-| `…-reprice-error` | `RepriceError` ≥ 1 |
-| `…-sfn-failed` | Step Functions `ExecutionsFailed` ≥ 1 |
-| `…-lambda-errors` | Any of the four Lambdas `Errors` ≥ 1 |
-| `…-inventory-value-change` | \|`InventoryValue`\| hourly change ≥ **20%** (param) **and** `PriceUpdatesApplied` = 0 **and** \|`CardsInInventory`\| change &lt; 10% |
-| `…-lambda-near-timeout` | Max Lambda `Duration` ≥ `LambdaDurationAlarmMs` (default **12 min** / 720000 ms) |
+| `…-reprice-error` | `RepriceError` ≥ 1 on **≥3 of last 5 hourly** samples. Single failure does not page. |
+| `…-sfn-failed` | `ExecutionsFailed` ≥ 1 on **≥3 of last 5 hourly** samples. |
+| `…-lambda-errors` | Lambda `Errors` ≥ 1 on **≥3 of last 5 hourly** samples (no `FILL`). |
+| `…-inventory-value-change` | \|`InventoryValue`\| hourly change ≥ **20%** (param) **and** `PriceUpdatesApplied` = 0 **and** \|`CardsInInventory`\| change &lt; 10%. `FILL(applied,0)` is intentional here. Clears when the next hour’s signal drops (change-detection, not a sticky failure latch). |
+| `…-lambda-near-timeout` | Max Lambda `Duration` ≥ `LambdaDurationAlarmMs` (default **12 min** / 720000 ms). No `FILL` to 0; quiet periods keep prior state. |
+
+CT HTTP client retries with **full jitter** (capped by `CT_HTTP_RETRY_MAX_S`, default 30s):
+- **GET/HEAD:** 429/502/503/504 + network errors, up to `CT_HTTP_MAX_RETRIES` (default 3); honors `Retry-After` when present.
+- **POST mutations** (`bulk_create` / `bulk_update`): **429 only** (avoid double-submit on 503).
 
 Inventory € swing with a big stock-count change (bulk add/remove) or with many LIVE applies is treated as expected and suppressed. A large € swing with **no** applies and a stable listing count is the worrisome case (bad export, market shock in the plan, etc.).
 

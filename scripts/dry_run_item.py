@@ -19,6 +19,7 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from cardtrader_inventory.buyer_fees import buyer_total_cents
 from cardtrader_inventory.config import ConfigError, PricingPolicy, load_api_token
 from cardtrader_inventory.ct_client import CardTraderClient, CardTraderError
 from cardtrader_inventory.models import Listing
@@ -67,6 +68,19 @@ def _eur(cents: int | None) -> str:
         return "n/a"
     return f"€{cents / 100.0:.2f}"
 
+
+def _eur_buyer_facing(cents: int | None) -> str:
+    """Marketplace comps are already what the customer pays."""
+    if cents is None:
+        return "n/a"
+    return f"{_eur(cents)} (customer)"
+
+
+def _eur_list_with_customer(list_cents: int | None) -> str:
+    """Seller list price + implied CT checkout total for the buyer."""
+    if list_cents is None:
+        return "n/a"
+    return f"{_eur(list_cents)} (customer {_eur(buyer_total_cents(list_cents))})"
 
 def resolve_listing(
     client: CardTraderClient,
@@ -173,12 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     floor_cents, floor_key = policy.floor_cents_for(
         rarity=listing.rarity, foil=listing.foil
     )
-    print(f"your price:     {_eur(listing.price_cents)} ({listing.price_cents}¢)")
+    print(f"your price:     {_eur_list_with_customer(listing.price_cents)}")
     print(
         f"policy:         median_window={policy.market_median_window} "
         f"ct_zero_only={policy.ct_zero_only} "
         f"nm_sp_merged=True "
         f"spread_max={policy.max_comp_spread_pct:g}% "
+        f"(only if window_min>{policy.comp_spread_min_price_cents}¢) "
         f"dead_band=max({policy.min_change_cents}¢,{policy.min_change_pct:g}%) "
         f"clamp=decrease≤{policy.max_decrease_pct:g}% (no upside clamp) "
         f"floor={floor_key}:{floor_cents}¢"
@@ -212,9 +227,9 @@ def main(argv: list[str] | None = None) -> int:
     if row.skip_reason:
         print(f"skip_reason:    {row.skip_reason.value}")
     print(f"reason:         {row.reason}")
-    print(f"market:         {_eur(row.market_price_cents)}")
-    print(f"target:         {_eur(row.target_price_cents)}")
-    print(f"proposed:       {_eur(row.proposed_price_cents)}")
+    print(f"market:         {_eur_buyer_facing(row.market_price_cents)}")
+    print(f"target:         {_eur_list_with_customer(row.target_price_cents)}")
+    print(f"proposed:       {_eur_list_with_customer(row.proposed_price_cents)}")
     print(
         f"clamps:         decrease={row.clamp_decrease} increase={row.clamp_increase} "
         f"sentinel={row.sentinel_clear}"
@@ -227,8 +242,9 @@ def main(argv: list[str] | None = None) -> int:
         delta = row.proposed_price_cents - listing.price_cents
         pct = 100.0 * delta / listing.price_cents
         print(
-            f"delta:          {_eur(listing.price_cents)} → {_eur(row.proposed_price_cents)} "
-            f"({delta:+d}¢ / {pct:+.1f}%)"
+            f"delta:          {_eur_list_with_customer(listing.price_cents)} → "
+            f"{_eur_list_with_customer(row.proposed_price_cents)} "
+            f"({delta:+d}¢ list / {pct:+.1f}%)"
         )
     return 0
 
