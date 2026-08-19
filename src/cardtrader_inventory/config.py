@@ -159,7 +159,7 @@ class PricingPolicy:
     nth_lowest: int = 3
     min_comparable_offers: int = 3
     insufficient_comps_fallback: InsufficientCompsFallback = "skip"
-    max_decrease_pct: float = 5.0
+    max_decrease_pct: float = 1.5
     max_increase_pct: float = 30.0  # unused: upside is not clamped
     # Fallback / "Other" floor when rarity is missing or unknown.
     minimum_floor_cents: int = 5
@@ -231,7 +231,7 @@ class PricingPolicy:
             nth_lowest=_env_int("NTH_LOWEST", 3),
             min_comparable_offers=_env_int("MIN_COMPARABLE_OFFERS", 3),
             insufficient_comps_fallback=fallback,  # type: ignore[arg-type]
-            max_decrease_pct=_env_float("MAX_DECREASE_PCT", 5.0),
+            max_decrease_pct=_env_float("MAX_DECREASE_PCT", 1.5),
             max_increase_pct=_env_float("MAX_INCREASE_PCT", 30.0),
             minimum_floor_cents=minimum_floor_cents,
             rarity_floor_cents=_env_rarity_floors(minimum_floor_cents),

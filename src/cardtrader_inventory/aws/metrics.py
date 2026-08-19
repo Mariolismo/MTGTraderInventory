@@ -99,9 +99,7 @@ def plan_observability_metrics(
         "CardsInInventory": (cards_in_inventory, "Count"),
         "InventoryValue": (inventory_eur, "None"),
         "RepriceError": (0 if safety_ok else 1, "Count"),
-        "PriceUpdatesProposed": (summary.price_updates_proposed, "Count"),
         "SkipWideSpread": (summary.skipped_wide_spread, "Count"),
         "SkipInsufficientComps": (summary.skipped_insufficient_comps, "Count"),
-        "SentinelCleared": (summary.sentinel_initial_priced, "Count"),
         "SentinelRemaining": (count_sentinel_remaining(plan), "Count"),
     }

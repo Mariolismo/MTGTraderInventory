@@ -42,6 +42,7 @@ def run_dry_run(
     sample_size: int = 25,
     mode: str = "DRY_RUN",
     pricing_run_id: str | None = None,
+    discount_pct: int = 0,
 ) -> DryRunResult:
     """FETCH → VALIDATE → chunked PLAN → SAFETY CHECKS. Never mutates CT prices.
 
@@ -93,6 +94,7 @@ def run_dry_run(
             chunk_id=str(chunk["chunk_id"]),
             fetch_keys_raw=list(chunk["fetch_keys"]),
             exclude_user_id=prepared.owner_user_id,
+            discount_pct=discount_pct,
         )
         chunk_plans.append(chunk_result.plan)
 

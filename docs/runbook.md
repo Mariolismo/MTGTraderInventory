@@ -21,7 +21,12 @@ python scripts/apply_plan.py --plan artifacts\<run>-plan.jsonl --confirm-live
 
 # ManaBox
 python scripts/import_manabox.py path\to\file.csv
-python scripts/compare_manabox.py path\to\CardTrader.csv
+python scripts/compare_manabox.py path\to\for-sale-binder.csv
+python scripts/export_manabox_stock.py
+
+# Weekly sales / discount (diagnostic)
+python scripts/check_weekly_sales.py
+python scripts/check_weekly_sales.py --raw   # dump first order JSON
 
 python -m unittest discover -s tests -v
 ```

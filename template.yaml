@@ -52,7 +52,7 @@ Globals:
         COMP_SPREAD_MIN_PRICE_CENTS: "500"
         MIN_CHANGE_CENTS: "0"
         MIN_CHANGE_PCT: "0"
-        MAX_DECREASE_PCT: "5"
+        MAX_DECREASE_PCT: "1.5"
         MAX_ALLOWED_DECREASE_PCT: "5"
         MAX_PROPOSED_PCT: "100"
         CT_ZERO_ONLY: "true"
@@ -84,7 +84,7 @@ Resources:
           - Id: ExpireRuns
             Status: Enabled
             Prefix: runs/
-            ExpirationInDays: 90
+            ExpirationInDays: 7
 
   IdempotencyTable:
     Type: AWS::DynamoDB::Table
@@ -106,25 +106,25 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-prepare"
-      RetentionInDays: 90
+      RetentionInDays: 7
 
   PlanChunkLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-plan-chunk"
-      RetentionInDays: 90
+      RetentionInDays: 7
 
   MergeLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-merge"
-      RetentionInDays: 90
+      RetentionInDays: 7
 
   ApplyLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-apply"
-      RetentionInDays: 90
+      RetentionInDays: 7
 
   PrepareFunction:
     Type: AWS::Serverless::Function
@@ -137,6 +137,8 @@ Resources:
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
         - Statement:
             - Effect: Allow
               Action:
@@ -331,7 +333,7 @@ Resources:
                 "yAxis": { "left": { "label": "minutes", "showUnits": false, "min": 0 } },
                 "metrics": [
                   [ "AWS/States", "ExecutionTime", "StateMachineArn", "${RepriceStateMachine}", { "id": "et_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
-                  [ { "expression": "et_ms/60000", "label": "E2E (min)", "id": "et_min", "color": "#1f77b4", "period": 60 } ]
+                  [ { "expression": "et_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] E2E (min)", "id": "et_min", "color": "#1f77b4", "period": 60 } ]
                 ]
               }
             },
@@ -345,7 +347,7 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "CardsInInventory", { "color": "#17becf" } ]
+                  [ "CardTraderInventory/Reprice", "CardsInInventory", { "color": "#17becf", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] CardsInInventory" } ]
                 ]
               }
             },
@@ -359,7 +361,7 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "InventoryValue", { "color": "#2ca02c" } ]
+                  [ "CardTraderInventory/Reprice", "InventoryValue", { "color": "#2ca02c", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] InventoryValue" } ]
                 ]
               }
             },
@@ -373,7 +375,7 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "PriceUpdatesApplied", { "color": "#9467bd" } ]
+                  [ "CardTraderInventory/Reprice", "PriceUpdatesApplied", { "color": "#9467bd", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PriceUpdatesApplied" } ]
                 ]
               }
             },
@@ -387,7 +389,7 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "RepriceError", { "color": "#d62728" } ]
+                  [ "CardTraderInventory/Reprice", "RepriceError", { "color": "#d62728", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] RepriceError" } ]
                 ]
               }
             },
@@ -401,30 +403,64 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "SkipWideSpread", { "color": "#ff7f0e" } ],
-                  [ ".", "SkipInsufficientComps", { "color": "#8c564b" } ],
-                  [ ".", "PriceUpdatesProposed", { "color": "#1f77b4" } ]
+                  [ "CardTraderInventory/Reprice", "SkipWideSpread", { "color": "#ff7f0e", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] SkipWideSpread" } ],
+                  [ ".", "SkipInsufficientComps", { "color": "#8c564b", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] SkipInsufficientComps" } ]
                 ]
               }
             },
             {
               "type": "metric",
-              "x": 12, "y": 13, "width": 12, "height": 6,
+              "x": 0, "y": 19, "width": 8, "height": 6,
               "properties": {
-                "title": "Sentinel (cleared vs remaining)",
+                "title": "Weekly sales (cents)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 3600,
+                "view": "timeSeries",
+                "annotations": {
+                  "horizontal": [
+                    { "label": "3% discount threshold", "value": 10000, "color": "#ff7f0e" },
+                    { "label": "5% discount threshold", "value": 18000, "color": "#d62728" },
+                    { "label": "Target (300 EUR)", "value": 30000, "color": "#2ca02c" }
+                  ]
+                },
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "WeeklySalesCents", { "color": "#17becf", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] WeeklySalesCents" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 19, "width": 8, "height": 6,
+              "properties": {
+                "title": "Weekly Discount (%)",
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "period": 3600,
+                "view": "timeSeries",
+                "yAxis": { "left": { "min": 0, "max": 10, "showUnits": false } },
+                "metrics": [
+                  [ "CardTraderInventory/Reprice", "WeeklyDiscountPct", { "color": "#e377c2", "label": "[last: ${!LAST}%, ${!LAST_TIME_RELATIVE}] WeeklyDiscountPct" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 19, "width": 8, "height": 6,
+              "properties": {
+                "title": "Sentinel remaining",
                 "region": "${AWS::Region}",
                 "stat": "Maximum",
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "SentinelCleared", { "color": "#2ca02c" } ],
-                  [ ".", "SentinelRemaining", { "color": "#d62728" } ]
+                  [ "CardTraderInventory/Reprice", "SentinelRemaining", { "color": "#d62728", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] SentinelRemaining" } ]
                 ]
               }
             },
             {
               "type": "metric",
-              "x": 0, "y": 19, "width": 8, "height": 5,
+              "x": 0, "y": 25, "width": 8, "height": 5,
               "properties": {
                 "title": "Lambda duration (minutes)",
                 "region": "${AWS::Region}",
@@ -435,16 +471,16 @@ Resources:
                   [ "AWS/Lambda", "Duration", "FunctionName", "${PlanChunkFunction}", { "id": "chunk_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
                   [ "AWS/Lambda", "Duration", "FunctionName", "${MergeFunction}", { "id": "merge_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
                   [ "AWS/Lambda", "Duration", "FunctionName", "${ApplyFunction}", { "id": "apply_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
-                  [ { "expression": "prep_ms/60000", "label": "Prepare (min)", "id": "prep_min", "color": "#17becf", "period": 60 } ],
-                  [ { "expression": "chunk_ms/60000", "label": "PlanChunk (min)", "id": "chunk_min", "color": "#1f77b4", "period": 60 } ],
-                  [ { "expression": "merge_ms/60000", "label": "Merge (min)", "id": "merge_min", "color": "#2ca02c", "period": 60 } ],
-                  [ { "expression": "apply_ms/60000", "label": "Apply (min)", "id": "apply_min", "color": "#ff7f0e", "period": 60 } ]
+                  [ { "expression": "prep_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Prepare (min)", "id": "prep_min", "color": "#17becf", "period": 60 } ],
+                  [ { "expression": "chunk_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanChunk (min)", "id": "chunk_min", "color": "#1f77b4", "period": 60 } ],
+                  [ { "expression": "merge_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Merge (min)", "id": "merge_min", "color": "#2ca02c", "period": 60 } ],
+                  [ { "expression": "apply_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Apply (min)", "id": "apply_min", "color": "#ff7f0e", "period": 60 } ]
                 ]
               }
             },
             {
               "type": "metric",
-              "x": 8, "y": 19, "width": 8, "height": 5,
+              "x": 8, "y": 25, "width": 8, "height": 5,
               "properties": {
                 "title": "Lambda errors",
                 "region": "${AWS::Region}",
@@ -452,16 +488,16 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "AWS/Lambda", "Errors", "FunctionName", "${PrepareFunction}", { "color": "#d62728" } ],
-                  [ ".", ".", ".", "${PlanChunkFunction}", { "color": "#ff9896" } ],
-                  [ ".", ".", ".", "${MergeFunction}", { "color": "#e377c2" } ],
-                  [ ".", ".", ".", "${ApplyFunction}", { "color": "#c49c94" } ]
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${PrepareFunction}", { "color": "#d62728", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Prepare" } ],
+                  [ ".", ".", ".", "${PlanChunkFunction}", { "color": "#ff9896", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanChunk" } ],
+                  [ ".", ".", ".", "${MergeFunction}", { "color": "#e377c2", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Merge" } ],
+                  [ ".", ".", ".", "${ApplyFunction}", { "color": "#c49c94", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Apply" } ]
                 ]
               }
             },
             {
               "type": "metric",
-              "x": 16, "y": 19, "width": 8, "height": 5,
+              "x": 16, "y": 25, "width": 8, "height": 5,
               "properties": {
                 "title": "Step Functions failed executions",
                 "region": "${AWS::Region}",
@@ -469,7 +505,7 @@ Resources:
                 "period": 60,
                 "view": "timeSeries",
                 "metrics": [
-                  [ "AWS/States", "ExecutionsFailed", "StateMachineArn", "${RepriceStateMachine}", { "color": "#d62728" } ]
+                  [ "AWS/States", "ExecutionsFailed", "StateMachineArn", "${RepriceStateMachine}", { "color": "#d62728", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] ExecutionsFailed" } ]
                 ]
               }
             }

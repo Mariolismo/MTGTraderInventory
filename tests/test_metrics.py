@@ -63,11 +63,11 @@ class ObservabilityMetricsTests(unittest.TestCase):
             inventory_eur=1.5,
             safety_ok=True,
         )
-        self.assertEqual(metrics["SentinelCleared"], (1, "Count"))
         self.assertEqual(metrics["SentinelRemaining"], (1, "Count"))
         self.assertEqual(metrics["SkipWideSpread"], (1, "Count"))
-        self.assertEqual(metrics["PriceUpdatesProposed"], (1, "Count"))
-        # Stay under free-tier-ish budget with apply's PriceUpdatesApplied.
+        self.assertNotIn("SentinelCleared", metrics)
+        self.assertNotIn("PriceUpdatesProposed", metrics)
+        # 9 merge-time metrics + WeeklyDiscountPct/WeeklySalesCents from prepare = 10 total custom names.
         self.assertLessEqual(len(metrics), 8)
 
 

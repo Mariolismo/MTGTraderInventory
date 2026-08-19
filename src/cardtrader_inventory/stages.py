@@ -321,6 +321,7 @@ def generate_pricing_plan_for_keys(
     pricing_run_id: str,
     mode: str = "DRY_RUN",
     exclude_user_id: int | None = None,
+    discount_pct: int = 0,
 ) -> PricingPlan:
     """Market fetch + plan rows for listings whose fetch key is in ``fetch_keys``."""
     mtg = mtg_listings(listings, policy)
@@ -348,6 +349,7 @@ def generate_pricing_plan_for_keys(
                 offers,
                 policy,
                 exclude_user_id=owner_id,
+                discount_pct=discount_pct,
             )
         )
 

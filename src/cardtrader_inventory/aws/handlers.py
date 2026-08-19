@@ -36,6 +36,7 @@ from cardtrader_inventory.ct_client import CardTraderClient
 from cardtrader_inventory.pipeline import build_summary_dict, plan_jsonl_bytes
 from cardtrader_inventory.rate_limiter import RateLimiter
 from cardtrader_inventory.stages import StageError, fetch_inventory
+from cardtrader_inventory.weekly_sales import WeeklySalesStore
 
 logger = logging.getLogger()
 if not logger.handlers:
@@ -90,6 +91,28 @@ def prepare_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "summary_counts": {},
         }
 
+    # Weekly discount: fetch live orders, compute sales total, evaluate tier.
+    # Failures here degrade gracefully — discount defaults to 0, run continues.
+    table_name = os.environ.get("IDEMPOTENCY_TABLE", "").strip()
+    discount_pct = 0
+    if table_name:
+        from datetime import datetime, timezone
+        from cardtrader_inventory.weekly_sales import sync_weekly_sales
+        try:
+            now = datetime.now(timezone.utc)
+            sales_store = WeeklySalesStore(table_name)
+            weekly_row = sync_weekly_sales(client, sales_store, now)
+            discount_pct = weekly_row.discount_pct
+            logger.info(
+                "Weekly sales: %d cents, discount=%d%%", weekly_row.sales_cents, discount_pct
+            )
+            put_metrics({
+                "WeeklyDiscountPct": (discount_pct, "None"),
+                "WeeklySalesCents": (weekly_row.sales_cents, "None"),
+            })
+        except Exception:
+            logger.exception("Weekly sales sync failed — proceeding with discount_pct=0")
+
     prefix = run_prefix(prepared.pricing_run_id)
     listings_key = f"{prefix}/listings.jsonl"
     manifest_key = f"{prefix}/chunks/manifest.json"
@@ -121,6 +144,7 @@ def prepare_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "s3_bucket": bucket,
                 "listings_key": listings_key,
                 "owner_user_id": prepared.owner_user_id,
+                "discount_pct": discount_pct,
             }
         )
 
@@ -170,6 +194,8 @@ def plan_chunk_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     owner_raw = event.get("owner_user_id")
     owner_id = int(owner_raw) if owner_raw is not None else None
 
+    discount_pct = int(event.get("discount_pct") or 0)
+
     client = CardTraderClient(
         load_api_token(),
         policy,
@@ -184,6 +210,7 @@ def plan_chunk_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         chunk_id=chunk_id,
         fetch_keys_raw=list(event.get("fetch_keys") or []),
         exclude_user_id=owner_id,
+        discount_pct=discount_pct,
     )
 
     put_bytes(
@@ -200,6 +227,7 @@ def plan_chunk_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "plan_key": plan_key,
         "rows": len(chunk_result.plan.rows),
         "proposed": chunk_result.plan.summary.price_updates_proposed,
+        "discount_pct": discount_pct,
     }
     logger.info("Plan chunk handler result: %s", json.dumps(payload))
     return payload

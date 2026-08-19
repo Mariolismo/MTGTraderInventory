@@ -159,6 +159,7 @@ def run_plan_chunk(
     chunk_id: str,
     fetch_keys_raw: list,
     exclude_user_id: int | None = None,
+    discount_pct: int = 0,
 ) -> ChunkPlanResult:
     """Price listings for one fetch-key chunk."""
     keys = [decode_fetch_key(k) for k in fetch_keys_raw]
@@ -170,6 +171,7 @@ def run_plan_chunk(
         pricing_run_id=pricing_run_id,
         mode=mode,
         exclude_user_id=exclude_user_id,
+        discount_pct=discount_pct,
     )
     return ChunkPlanResult(
         chunk_id=chunk_id,

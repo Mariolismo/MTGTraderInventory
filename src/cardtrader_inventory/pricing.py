@@ -222,6 +222,7 @@ def price_listing(
     policy: PricingPolicy,
     *,
     exclude_user_id: int | None,
+    discount_pct: int = 0,
 ) -> PlanRow:
     base = PlanRow(
         listing_id=listing.id,
@@ -278,6 +279,10 @@ def price_listing(
     else:
         market_price = selection.market_cents
         method_tag = selection.detail
+
+    if discount_pct > 0:
+        market_price = int(market_price * (1.0 - discount_pct / 100.0))
+        method_tag += f";discount={discount_pct}%"
 
     is_sentinel = listing.price_cents >= policy.sentinel_price_cents
     # Marketplace comps are buyer-facing (fee included). We propose the seller

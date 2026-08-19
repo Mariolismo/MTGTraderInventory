@@ -514,6 +514,36 @@ class CardTraderClient:
             logger.debug("Job %s still %s; polling…", job_uuid, state)
 
 
+    def list_orders(
+        self,
+        *,
+        state: str | None = None,
+        page: int = 1,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """GET /orders?order_as=seller with optional state filter.
+
+        Args:
+            state:  Order state filter (e.g. ``"hub_pending"``).
+            page:   1-based page number (default 1).
+            limit:  Results per page, max 100 (default 100).
+        """
+        query: dict[str, str] = {
+            "order_as": "seller",
+            "page": str(page),
+            "limit": str(limit),
+        }
+        if state:
+            query["state"] = state
+        payload = self._request("GET", "/orders", query=query)
+        if not isinstance(payload, list):
+            raise CardTraderError(
+                f"Unexpected orders payload: {type(payload).__name__}",
+                body=str(payload)[:500],
+            )
+        return payload
+
+
 def parse_price_cents(value: Any) -> int | None:
     """Normalize CT price fields (int cents or money object) to int cents."""
     if value is None:

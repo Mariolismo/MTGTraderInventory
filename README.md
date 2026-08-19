@@ -36,6 +36,8 @@ Extra helpers: ManaBox CSV import and ManaBox ↔ inventory compare.
 
 Setup, deploy, and day-to-day commands: **[docs/runbook.md](docs/runbook.md)**
 
+Multi-marketplace adapters (stubs + checklist): **[docs/platforms.md](docs/platforms.md)**
+
 ## Note
 
 Most of this codebase was produced with AI assistance (in less than 4 hours, geez I am going to be unemployed xD). A proper human code review is overdue, as are broader hygiene passes (structure, tests, CI/CD). That work is intentional backlog — not a claim that the stack is “done” from an engineering-process standpoint.
