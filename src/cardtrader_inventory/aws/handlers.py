@@ -36,7 +36,7 @@ from cardtrader_inventory.ct_client import CardTraderClient
 from cardtrader_inventory.pipeline import build_summary_dict, plan_jsonl_bytes
 from cardtrader_inventory.rate_limiter import RateLimiter
 from cardtrader_inventory.stages import StageError, fetch_inventory
-from cardtrader_inventory.weekly_sales import WeeklySalesStore
+from cardtrader_inventory.weekly_sales import fetch_weekly_sales
 
 logger = logging.getLogger()
 if not logger.handlers:
@@ -91,27 +91,20 @@ def prepare_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "summary_counts": {},
         }
 
-    # Weekly discount: fetch live orders, compute sales total, evaluate tier.
+    # Weekly discount: fetch hub_pending orders, compute sales total, evaluate tier.
     # Failures here degrade gracefully — discount defaults to 0, run continues.
-    table_name = os.environ.get("IDEMPOTENCY_TABLE", "").strip()
     discount_pct = 0
-    if table_name:
+    try:
         from datetime import datetime, timezone
-        from cardtrader_inventory.weekly_sales import sync_weekly_sales
-        try:
-            now = datetime.now(timezone.utc)
-            sales_store = WeeklySalesStore(table_name)
-            weekly_row = sync_weekly_sales(client, sales_store, now)
-            discount_pct = weekly_row.discount_pct
-            logger.info(
-                "Weekly sales: %d cents, discount=%d%%", weekly_row.sales_cents, discount_pct
-            )
-            put_metrics({
-                "WeeklyDiscountPct": (discount_pct, "None"),
-                "WeeklySalesCents": (weekly_row.sales_cents, "None"),
-            })
-        except Exception:
-            logger.exception("Weekly sales sync failed — proceeding with discount_pct=0")
+        now = datetime.now(timezone.utc)
+        result = fetch_weekly_sales(client, now)
+        discount_pct = result.discount_pct
+        put_metrics({
+            "WeeklyDiscountPct": (discount_pct, "None"),
+            "WeeklySalesCents": (result.sales_cents, "None"),
+        })
+    except Exception:
+        logger.exception("Weekly sales check failed — proceeding with discount_pct=0")
 
     prefix = run_prefix(prepared.pricing_run_id)
     listings_key = f"{prefix}/listings.jsonl"

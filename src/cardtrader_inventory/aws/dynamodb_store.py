@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+_TTL_HOURS = 24
 
 from cardtrader_inventory.models import ApplyBatchResult
 
@@ -33,6 +35,8 @@ class DynamoBatchIdempotencyStore:
         return item.get("status") == "completed"
 
     def mark_completed(self, batch: ApplyBatchResult, *, pricing_run_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        expires_at = int((now + timedelta(hours=_TTL_HOURS)).timestamp())
         self._table.put_item(
             Item={
                 "pricing_run_id": pricing_run_id,
@@ -43,7 +47,8 @@ class DynamoBatchIdempotencyStore:
                 "ok": batch.ok,
                 "warning": batch.warning,
                 "error": batch.error,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": now.isoformat(),
+                "ttl": expires_at,
             }
         )
         logger.info(

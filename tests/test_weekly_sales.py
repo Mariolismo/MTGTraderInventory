@@ -11,7 +11,6 @@ from cardtrader_inventory.pricing import price_listing
 from cardtrader_inventory.weekly_sales import (
     evaluate_discount,
     sum_pending_sales_cents,
-    week_key,
 )
 
 
@@ -46,20 +45,6 @@ def _offer(**overrides) -> MarketOffer:
     )
     base.update(overrides)
     return MarketOffer(**base)
-
-
-class WeekKeyTests(unittest.TestCase):
-    def test_sunday_is_own_week(self) -> None:
-        sun = datetime(2026, 8, 16, 10, 0, tzinfo=timezone.utc)  # Sunday
-        self.assertEqual(week_key(sun), "week-2026-08-16")
-
-    def test_wednesday_maps_to_sunday(self) -> None:
-        wed = datetime(2026, 8, 19, 14, 0, tzinfo=timezone.utc)  # Wednesday
-        self.assertEqual(week_key(wed), "week-2026-08-16")
-
-    def test_saturday_maps_to_sunday(self) -> None:
-        sat = datetime(2026, 8, 22, 23, 59, tzinfo=timezone.utc)  # Saturday
-        self.assertEqual(week_key(sat), "week-2026-08-16")
 
 
 class EvaluateDiscountTests(unittest.TestCase):

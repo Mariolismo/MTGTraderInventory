@@ -100,6 +100,9 @@ Resources:
           KeyType: HASH
         - AttributeName: batch_id
           KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
   # Create log groups before first invoke so retention applies (default is never expire).
   PrepareLogGroup:
@@ -137,8 +140,6 @@ Resources:
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactsBucket
-        - DynamoDBCrudPolicy:
-            TableName: !Ref IdempotencyTable
         - Statement:
             - Effect: Allow
               Action:
