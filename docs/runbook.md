@@ -101,7 +101,7 @@ aws stepfunctions start-execution `
   --input "{\"mode\":\"LIVE\"}" --region $Region
 ```
 
-Per run under `runs/<id>/`: `listings.jsonl`, `chunks/*`, `plan.jsonl`, `summary.json`, `apply.json` (LIVE).
+Per run under `runs/<id>/`: `listings.jsonl`, `chunks/*`, `plan.jsonl` (required handoffs). Counts and apply results go to CloudWatch metrics/logs only — no `summary.json` / `apply.json`.
 
 ### Alarms (email)
 
@@ -128,4 +128,4 @@ CT HTTP client retries with **full jitter** (capped by `CT_HTTP_RETRY_MAX_S`, de
 
 Inventory € swing with a big stock-count change (bulk add/remove) or with many LIVE applies is treated as expected and suppressed. A large € swing with **no** applies and a stable listing count is the worrisome case (bad export, market shock in the plan, etc.).
 
-**Not alarmed (on purpose):** empty `CardsInInventory` (too arbitrary). S3 / log volume — `runs/` already expires at 90 days and log groups retain 90 days; CloudWatch `BucketSizeBytes` is daily and laggy, so skip until storage actually shows up on the bill.
+**Not alarmed (on purpose):** empty `CardsInInventory` (too arbitrary). S3 / log volume — `runs/` and Lambda log groups expire at **7 days**.

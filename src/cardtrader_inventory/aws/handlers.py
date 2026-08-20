@@ -9,7 +9,6 @@ from typing import Any
 
 from cardtrader_inventory.apply import (
     apply_plan_updates,
-    apply_result_to_dict,
     load_plan_jsonl_text,
     update_rows_from_plan,
 )
@@ -33,7 +32,7 @@ from cardtrader_inventory.aws.s3_artifacts import (
 )
 from cardtrader_inventory.config import PricingPolicy, load_api_token
 from cardtrader_inventory.ct_client import CardTraderClient
-from cardtrader_inventory.pipeline import build_summary_dict, plan_jsonl_bytes
+from cardtrader_inventory.pipeline import plan_jsonl_bytes
 from cardtrader_inventory.rate_limiter import RateLimiter
 from cardtrader_inventory.stages import StageError, fetch_inventory
 from cardtrader_inventory.weekly_sales import fetch_weekly_sales
@@ -99,10 +98,10 @@ def prepare_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         result = fetch_weekly_sales(client, now)
         discount_pct = result.discount_pct
-        put_metrics({
-            "WeeklyDiscountPct": (discount_pct, "None"),
-            "WeeklySalesCents": (result.sales_cents, "None"),
-        })
+            put_metrics({
+                "WeeklyDiscountPct": (discount_pct, "None"),
+                "WeeklySalesEur": (round(result.sales_cents / 100.0, 2), "None"),
+            })
     except Exception:
         logger.exception("Weekly sales check failed — proceeding with discount_pct=0")
 
@@ -274,9 +273,7 @@ def merge_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         sample_size=25,
     )
 
-    summary_key = f"{prefix}/summary.json"
     plan_key = f"{prefix}/plan.jsonl"
-    put_json(bucket, summary_key, build_summary_dict(result))
     put_bytes(
         bucket,
         plan_key,
@@ -304,7 +301,6 @@ def merge_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "s3_bucket": bucket,
         "s3_keys": {
             **s3_keys,
-            "summary": summary_key,
             "plan": plan_key,
             "prefix": prefix,
             "manifest": manifest_key,
@@ -358,9 +354,7 @@ def plan_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         }
 
     prefix = run_prefix(result.pricing_run_id)
-    summary_key = f"{prefix}/summary.json"
     plan_key = f"{prefix}/plan.jsonl"
-    put_json(bucket, summary_key, build_summary_dict(result))
     put_bytes(
         bucket,
         plan_key,
@@ -385,7 +379,6 @@ def plan_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "safety_errors": result.safety.errors,
         "s3_bucket": bucket,
         "s3_keys": {
-            "summary": summary_key,
             "plan": plan_key,
             "prefix": prefix,
         },
@@ -444,9 +437,6 @@ def apply_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         store=store,
     )
 
-    apply_key = f"{run_prefix(pricing_run_id)}/apply.json"
-    put_json(bucket, apply_key, apply_result_to_dict(result))
-
     put_metrics(
         {
             "PriceUpdatesApplied": (result.applied_ok, "Count"),
@@ -463,10 +453,11 @@ def apply_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "applied_error": result.applied_error,
         "aborted_stale": result.aborted_stale,
         "skipped_idempotent": result.skipped_idempotent,
-        "s3_keys": {
-            **s3_keys,
-            "apply": apply_key,
-        },
+        "s3_keys": dict(s3_keys),
     }
+    if result.stale_listing_ids:
+        payload["stale_listing_ids"] = result.stale_listing_ids
+    if result.error_details:
+        payload["error_details"] = result.error_details
     logger.info("Apply handler result: %s", json.dumps(payload))
     return payload

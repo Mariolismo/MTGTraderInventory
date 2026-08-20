@@ -222,8 +222,9 @@ def apply_plan_updates(
     result.stale_listing_ids = stale_ids
     if stale_ids:
         logger.warning(
-            "Aborting %s stale updates (price/qty mismatch or missing listing)",
+            "Aborting %s stale updates (price/qty mismatch or missing listing): %s",
             len(stale_ids),
+            json.dumps(stale_ids),
         )
 
     batches = chunk_rows(fresh, policy.bulk_update_batch_size)
@@ -277,7 +278,15 @@ def apply_plan_updates(
         result.applied_ok += ok
         result.applied_warning += warning
         result.applied_error += error
-        result.error_details.extend(_error_details_from_job(job, batch_rows))
+        new_errs = _error_details_from_job(job, batch_rows)
+        result.error_details.extend(new_errs)
+        if new_errs:
+            logger.warning(
+                "Batch %s errors (%s): %s",
+                batch_id,
+                len(new_errs),
+                json.dumps(new_errs),
+            )
 
         store.mark_completed(batch_result, pricing_run_id=pricing_run_id)
         logger.info(

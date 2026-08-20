@@ -413,20 +413,21 @@ Resources:
               "type": "metric",
               "x": 0, "y": 19, "width": 8, "height": 6,
               "properties": {
-                "title": "Weekly sales (cents)",
+                "title": "Weekly sales (EUR)",
                 "region": "${AWS::Region}",
                 "stat": "Maximum",
                 "period": 3600,
                 "view": "timeSeries",
+                "yAxis": { "left": { "min": 0, "showUnits": false } },
                 "annotations": {
                   "horizontal": [
-                    { "label": "3% discount threshold", "value": 10000, "color": "#ff7f0e" },
-                    { "label": "5% discount threshold", "value": 18000, "color": "#d62728" },
-                    { "label": "Target (300 EUR)", "value": 30000, "color": "#2ca02c" }
+                    { "label": "3% discount threshold", "value": 100, "color": "#ff7f0e" },
+                    { "label": "5% discount threshold", "value": 180, "color": "#d62728" },
+                    { "label": "Target (300 EUR)", "value": 300, "color": "#2ca02c" }
                   ]
                 },
                 "metrics": [
-                  [ "CardTraderInventory/Reprice", "WeeklySalesCents", { "color": "#17becf", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] WeeklySalesCents" } ]
+                  [ "CardTraderInventory/Reprice", "WeeklySalesEur", { "color": "#17becf", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] WeeklySalesEur" } ]
                 ]
               }
             },
