@@ -28,10 +28,12 @@ python scripts/export_manabox_stock.py
 python scripts/check_weekly_sales.py
 python scripts/check_weekly_sales.py --raw   # dump first order JSON
 
+# Tests (need src on path — or use `pip install -e .` once after activate)
+$env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-Defaults (env / `template.yaml`): marketplace RPS **6**, median of cheapest **5** Zero comps, max decrease **5%**/run, dead-band max(**5¢**, **1%**).
+Defaults (env / `template.yaml`): marketplace RPS **6**, median of cheapest **5** Zero comps, max decrease **1.5%**/run, dead-band max(**5¢**, **1%**).
 
 ## AWS
 
@@ -114,13 +116,16 @@ Confirm the SNS subscription email AWS sends **before** you expect alarm mail. U
 
 Alarm-only mail (no OK spam).
 
-| Alarm | Fires when |
-|-------|------------|
-| `…-reprice-error` | `RepriceError` ≥ 1 on **≥3 of last 5 hourly** samples. Single failure does not page. |
-| `…-sfn-failed` | `ExecutionsFailed` ≥ 1 on **≥3 of last 5 hourly** samples. |
-| `…-lambda-errors` | Lambda `Errors` ≥ 1 on **≥3 of last 5 hourly** samples (no `FILL`). |
-| `…-inventory-value-change` | \|`InventoryValue`\| hourly change ≥ **20%** (param) **and** `PriceUpdatesApplied` = 0 **and** \|`CardsInInventory`\| change &lt; 10%. `FILL(applied,0)` is intentional here. Clears when the next hour’s signal drops (change-detection, not a sticky failure latch). |
-| `…-lambda-near-timeout` | Max Lambda `Duration` ≥ `LambdaDurationAlarmMs` (default **12 min** / 720000 ms). No `FILL` to 0; quiet periods keep prior state. |
+| Alarm | Fires when | Email? |
+|-------|------------|--------|
+| `…-sfn-failed` | `ExecutionsFailed` ≥ 1 on **2 consecutive hourly** samples | **Yes** (sole failure pager) |
+| `…-reprice-error` | `RepriceError` ≥ 1 on **≥3 of last 5 hourly** samples | No (dashboard) |
+| `…-lambda-errors` | Any reprice Lambda `Errors` ≥ 1 on **≥3 of last 5 hourly** samples | No (dashboard) |
+| `…-inventory-value-change` | \|`InventoryValue`\| hourly change ≥ **20%** **and** no applies **and** cards change &lt; 10% | Yes |
+| `…-lambda-near-timeout` | Max Lambda `Duration` ≥ `LambdaDurationAlarmMs` (default **12 min**) | Yes |
+
+Before deploy: `$env:PYTHONPATH = "src"; python -m unittest tests.test_handlers_import -v` (compile/import smoke — catches syntax errors).
+
 
 CT HTTP client retries with **full jitter** (capped by `CT_HTTP_RETRY_MAX_S`, default 30s):
 - **GET/HEAD:** 429/502/503/504 + network errors, up to `CT_HTTP_MAX_RETRIES` (default 3); honors `Retry-After` when present.

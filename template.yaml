@@ -534,7 +534,7 @@ Resources:
       AlarmName: !Sub "${AWS::StackName}-reprice-error"
       AlarmDescription: >-
         Custom RepriceError >= 1 on at least 3 of the last 5 hourly samples.
-        A single failed run does not page. Quiet periods keep state (ignore).
+        Dashboard / console only — SNS paging is on ExecutionsFailed (2/2).
       Namespace: CardTraderInventory/Reprice
       MetricName: RepriceError
       Statistic: Sum
@@ -544,16 +544,15 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: ignore
-      AlarmActions:
-        - !Ref AlarmTopic
 
   ExecutionsFailedAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-sfn-failed"
       AlarmDescription: >-
-        Step Functions ExecutionsFailed >= 1 on at least 3 of the last 5 hourly
-        samples. A single failed run (e.g. one CT 503) does not page.
+        Step Functions ExecutionsFailed >= 1 on 2 consecutive hourly samples.
+        Sole failure pager: one missed hour is quiet; two in a row means the
+        schedule is not recovering.
       Namespace: AWS/States
       MetricName: ExecutionsFailed
       Dimensions:
@@ -561,8 +560,8 @@ Resources:
           Value: !Ref RepriceStateMachine
       Statistic: Sum
       Period: 3600
-      EvaluationPeriods: 5
-      DatapointsToAlarm: 3
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: ignore
@@ -627,8 +626,8 @@ Resources:
       AlarmName: !Sub "${AWS::StackName}-lambda-errors"
       AlarmDescription: >-
         Any Prepare/PlanChunk/Merge/Apply Lambda Errors >= 1 on at least 3 of
-        the last 5 hourly samples. A single failed invoke does not page.
-        Quiet periods keep ALARM state (TreatMissingData=ignore, no FILL).
+        the last 5 hourly samples. Dashboard / console only — SNS paging is
+        on ExecutionsFailed (2/2).
       EvaluationPeriods: 5
       DatapointsToAlarm: 3
       Threshold: 1
@@ -683,8 +682,6 @@ Resources:
           Expression: prep+chunk+merge+apply
           Label: LambdaErrorsTotal
           ReturnData: true
-      AlarmActions:
-        - !Ref AlarmTopic
 
   LambdaNearTimeoutAlarm:
     Type: AWS::CloudWatch::Alarm

@@ -98,10 +98,10 @@ def prepare_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         result = fetch_weekly_sales(client, now)
         discount_pct = result.discount_pct
-            put_metrics({
-                "WeeklyDiscountPct": (discount_pct, "None"),
-                "WeeklySalesEur": (round(result.sales_cents / 100.0, 2), "None"),
-            })
+        put_metrics({
+            "WeeklyDiscountPct": (discount_pct, "None"),
+            "WeeklySalesEur": (round(result.sales_cents / 100.0, 2), "None"),
+        })
     except Exception:
         logger.exception("Weekly sales check failed — proceeding with discount_pct=0")
 
