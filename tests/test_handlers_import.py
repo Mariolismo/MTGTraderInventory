@@ -18,6 +18,7 @@ class HandlerImportTests(unittest.TestCase):
 
         for name in (
             "prepare_handler",
+            "plan_all_handler",
             "plan_chunk_handler",
             "merge_handler",
             "apply_handler",

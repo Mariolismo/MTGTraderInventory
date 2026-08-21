@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: CardTrader reprice — Plan + Apply via Step Functions (LIVE scheduled hourly).
+Description: CardTrader reprice — Plan + Apply via Step Functions (LIVE every 2 hours).
 
 Parameters:
   CardTraderJwt:
@@ -12,7 +12,7 @@ Parameters:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Enable EventBridge LIVE schedule (every hour).
+    Description: Enable EventBridge LIVE schedule (every 2 hours).
   AlarmEmail:
     Type: String
     Default: ""
@@ -64,6 +64,7 @@ Globals:
         CT_HTTP_RETRY_MAX_S: "30"
         MINIMUM_FLOOR_CENTS: "5"
         GENERATE_CHUNK_SIZE: "2000"
+        PLAN_WAVE_MIN_REMAINING_MS: "480000"
         CARDTRADER_JWT: !If [HasJwt, !Ref CardTraderJwt, ""]
 
 Resources:
@@ -111,16 +112,10 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-prepare"
       RetentionInDays: 7
 
-  PlanChunkLogGroup:
+  PlanAllLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-plan-chunk"
-      RetentionInDays: 7
-
-  MergeLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-merge"
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-plan-all"
       RetentionInDays: 7
 
   ApplyLogGroup:
@@ -136,10 +131,12 @@ Resources:
       FunctionName: !Sub "${AWS::StackName}-prepare"
       CodeUri: src/
       Handler: cardtrader_inventory.aws.handlers.prepare_handler
-      Description: Export + validate; write listings/manifest for Map chunks
+      Description: Export + validate; seed DynamoDB plan checkpoint
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
         - Statement:
             - Effect: Allow
               Action:
@@ -149,29 +146,19 @@ Resources:
                 StringEquals:
                   cloudwatch:namespace: CardTraderInventory/Reprice
 
-  PlanChunkFunction:
+  PlanAllFunction:
     Type: AWS::Serverless::Function
-    DependsOn: PlanChunkLogGroup
+    DependsOn: PlanAllLogGroup
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-plan-chunk"
+      FunctionName: !Sub "${AWS::StackName}-plan-all"
       CodeUri: src/
-      Handler: cardtrader_inventory.aws.handlers.plan_chunk_handler
-      Description: Marketplace fetch + plan rows for one fetch-key chunk
+      Handler: cardtrader_inventory.aws.handlers.plan_all_handler
+      Description: Plan chunks in waves with DynamoDB checkpoint; merge when done
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactsBucket
-
-  MergeFunction:
-    Type: AWS::Serverless::Function
-    DependsOn: MergeLogGroup
-    Properties:
-      FunctionName: !Sub "${AWS::StackName}-merge"
-      CodeUri: src/
-      Handler: cardtrader_inventory.aws.handlers.merge_handler
-      Description: Merge chunk plans, safety gate, write summary/plan.jsonl, metrics
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Ref ArtifactsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
         - Statement:
             - Effect: Allow
               Action:
@@ -209,77 +196,50 @@ Resources:
       Name: !Sub "${AWS::StackName}-reprice"
       Type: STANDARD
       Definition:
-        Comment: Prepare → sequential Map plan chunks → Merge/Safety → optional LIVE Apply
+        Comment: Prepare → PlanAll waves (DDB checkpoint) → Gate → optional LIVE Apply
         StartAt: Prepare
         States:
           Prepare:
             Type: Task
             Resource: !GetAtt PrepareFunction.Arn
             ResultPath: "$"
-            Next: HasChunks
+            Next: PlanAll
             Retry:
               - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
                 IntervalSeconds: 5
                 MaxAttempts: 2
                 BackoffRate: 2
-          HasChunks:
-            Type: Choice
-            Choices:
-              - Variable: "$.error"
-                IsPresent: true
-                Next: PrepareFailed
-            Default: PlanChunks
-          PrepareFailed:
-            Type: Fail
-            Error: PrepareFailed
-            Cause: Export/validate failed; see Prepare Lambda logs and RepriceError metric
-          PlanChunks:
-            Type: Map
-            ItemsPath: "$.chunks"
-            MaxConcurrency: 1
-            ResultPath: "$.chunk_results"
-            Iterator:
-              StartAt: PlanChunk
-              States:
-                PlanChunk:
-                  Type: Task
-                  Resource: !GetAtt PlanChunkFunction.Arn
-                  End: true
-                  Retry:
-                    - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
-                      IntervalSeconds: 5
-                      MaxAttempts: 2
-                      BackoffRate: 2
-            Next: Merge
-          Merge:
+          PlanAll:
             Type: Task
-            Resource: !GetAtt MergeFunction.Arn
+            Resource: !GetAtt PlanAllFunction.Arn
             ResultPath: "$"
-            Next: SafetyGate
+            Next: PlanMore
             Retry:
               - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
                 IntervalSeconds: 5
                 MaxAttempts: 2
                 BackoffRate: 2
-          SafetyGate:
+          PlanMore:
             Type: Choice
             Choices:
-              - Variable: "$.safety_ok"
+              - Variable: "$.more"
                 BooleanEquals: true
-                Next: ModeGate
-            Default: PlanSafetyFailed
-          ModeGate:
-            Type: Choice
-            Choices:
-              - Variable: "$.mode"
-                StringEquals: LIVE
+                Next: PlanAll
+              - And:
+                  - Variable: "$.safety_ok"
+                    BooleanEquals: true
+                  - Variable: "$.mode"
+                    StringEquals: "LIVE"
                 Next: Apply
+              - Variable: "$.safety_ok"
+                BooleanEquals: false
+                Next: PlanSafetyFailed
             Default: Finalize
           Apply:
             Type: Task
             Resource: !GetAtt ApplyFunction.Arn
             ResultPath: "$.apply"
-            Next: Finalize
+            End: true
             Retry:
               - ErrorEquals: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
                 IntervalSeconds: 5
@@ -290,22 +250,20 @@ Resources:
           PlanSafetyFailed:
             Type: Fail
             Error: PlanSafetyCheckFailed
-            Cause: safety_ok was false; inspect S3 summary if present
+            Cause: safety_ok was false; inspect S3 plan.jsonl and PlanAll logs
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref PrepareFunction
         - LambdaInvokePolicy:
-            FunctionName: !Ref PlanChunkFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref MergeFunction
+            FunctionName: !Ref PlanAllFunction
         - LambdaInvokePolicy:
             FunctionName: !Ref ApplyFunction
       Events:
         ScheduledLive:
           Type: Schedule
           Properties:
-            Description: LIVE reprice every hour
-            Schedule: rate(1 hour)
+            Description: LIVE reprice every 2 hours
+            Schedule: rate(2 hours)
             # Use State (not Enabled): SAM does not resolve !If on Enabled.
             State: !If [ScheduleIsEnabled, ENABLED, DISABLED]
             Input: '{"mode":"LIVE"}'
@@ -470,12 +428,10 @@ Resources:
                 "yAxis": { "left": { "label": "minutes", "showUnits": false, "min": 0 } },
                 "metrics": [
                   [ "AWS/Lambda", "Duration", "FunctionName", "${PrepareFunction}", { "id": "prep_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
-                  [ "AWS/Lambda", "Duration", "FunctionName", "${PlanChunkFunction}", { "id": "chunk_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
-                  [ "AWS/Lambda", "Duration", "FunctionName", "${MergeFunction}", { "id": "merge_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${PlanAllFunction}", { "id": "plan_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
                   [ "AWS/Lambda", "Duration", "FunctionName", "${ApplyFunction}", { "id": "apply_ms", "visible": false, "stat": "Maximum", "period": 60 } ],
                   [ { "expression": "prep_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Prepare (min)", "id": "prep_min", "color": "#17becf", "period": 60 } ],
-                  [ { "expression": "chunk_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanChunk (min)", "id": "chunk_min", "color": "#1f77b4", "period": 60 } ],
-                  [ { "expression": "merge_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Merge (min)", "id": "merge_min", "color": "#2ca02c", "period": 60 } ],
+                  [ { "expression": "plan_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanAll (min)", "id": "plan_min", "color": "#1f77b4", "period": 60 } ],
                   [ { "expression": "apply_ms/60000", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Apply (min)", "id": "apply_min", "color": "#ff7f0e", "period": 60 } ]
                 ]
               }
@@ -491,8 +447,7 @@ Resources:
                 "view": "timeSeries",
                 "metrics": [
                   [ "AWS/Lambda", "Errors", "FunctionName", "${PrepareFunction}", { "color": "#d62728", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Prepare" } ],
-                  [ ".", ".", ".", "${PlanChunkFunction}", { "color": "#ff9896", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanChunk" } ],
-                  [ ".", ".", ".", "${MergeFunction}", { "color": "#e377c2", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Merge" } ],
+                  [ ".", ".", ".", "${PlanAllFunction}", { "color": "#ff9896", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] PlanAll" } ],
                   [ ".", ".", ".", "${ApplyFunction}", { "color": "#c49c94", "label": "[last: ${!LAST}, ${!LAST_TIME_RELATIVE}] Apply" } ]
                 ]
               }
@@ -625,7 +580,7 @@ Resources:
     Properties:
       AlarmName: !Sub "${AWS::StackName}-lambda-errors"
       AlarmDescription: >-
-        Any Prepare/PlanChunk/Merge/Apply Lambda Errors >= 1 on at least 3 of
+        Any Prepare/PlanAll/Apply Lambda Errors >= 1 on at least 3 of
         the last 5 hourly samples. Dashboard / console only — SNS paging is
         on ExecutionsFailed (2/2).
       EvaluationPeriods: 5
@@ -645,25 +600,14 @@ Resources:
             Period: 3600
             Stat: Sum
           ReturnData: false
-        - Id: chunk
+        - Id: plan
           MetricStat:
             Metric:
               Namespace: AWS/Lambda
               MetricName: Errors
               Dimensions:
                 - Name: FunctionName
-                  Value: !Ref PlanChunkFunction
-            Period: 3600
-            Stat: Sum
-          ReturnData: false
-        - Id: merge
-          MetricStat:
-            Metric:
-              Namespace: AWS/Lambda
-              MetricName: Errors
-              Dimensions:
-                - Name: FunctionName
-                  Value: !Ref MergeFunction
+                  Value: !Ref PlanAllFunction
             Period: 3600
             Stat: Sum
           ReturnData: false
@@ -679,7 +623,7 @@ Resources:
             Stat: Sum
           ReturnData: false
         - Id: total
-          Expression: prep+chunk+merge+apply
+          Expression: prep+plan+apply
           Label: LambdaErrorsTotal
           ReturnData: true
 
@@ -707,25 +651,14 @@ Resources:
             Period: 300
             Stat: Maximum
           ReturnData: false
-        - Id: chunk
+        - Id: plan
           MetricStat:
             Metric:
               Namespace: AWS/Lambda
               MetricName: Duration
               Dimensions:
                 - Name: FunctionName
-                  Value: !Ref PlanChunkFunction
-            Period: 300
-            Stat: Maximum
-          ReturnData: false
-        - Id: merge
-          MetricStat:
-            Metric:
-              Namespace: AWS/Lambda
-              MetricName: Duration
-              Dimensions:
-                - Name: FunctionName
-                  Value: !Ref MergeFunction
+                  Value: !Ref PlanAllFunction
             Period: 300
             Stat: Maximum
           ReturnData: false
@@ -741,7 +674,7 @@ Resources:
             Stat: Maximum
           ReturnData: false
         - Id: slowest
-          Expression: MAX([prep,chunk,merge,apply])
+          Expression: MAX([prep,plan,apply])
           Label: MaxLambdaDurationMs
           ReturnData: true
       AlarmActions:
@@ -756,17 +689,14 @@ Outputs:
   PrepareFunctionName:
     Description: Prepare Lambda name
     Value: !Ref PrepareFunction
-  PlanChunkFunctionName:
-    Description: Plan-chunk Lambda name
-    Value: !Ref PlanChunkFunction
-  MergeFunctionName:
-    Description: Merge Lambda name
-    Value: !Ref MergeFunction
+  PlanAllFunctionName:
+    Description: Plan-all Lambda name
+    Value: !Ref PlanAllFunction
   ApplyFunctionName:
     Description: Apply Lambda name
     Value: !Ref ApplyFunction
   IdempotencyTableName:
-    Description: DynamoDB table for apply batch idempotency
+    Description: DynamoDB table for apply idempotency + plan checkpoints
     Value: !Ref IdempotencyTable
   DashboardName:
     Description: CloudWatch dashboard name

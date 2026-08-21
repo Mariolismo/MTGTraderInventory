@@ -39,6 +39,7 @@ class DynamoIdempotencyTests(unittest.TestCase):
         self.assertEqual(item["pricing_run_id"], "reprice-1")
         self.assertEqual(item["batch_id"], "reprice-1#chunk-001")
         self.assertEqual(item["status"], "completed")
+        self.assertIn("ttl", item)
 
 
 if __name__ == "__main__":

@@ -42,11 +42,14 @@ Region and stack name come from `samconfig.toml` (`region`, `stack_name`). Copy 
 | Resource | Name |
 |----------|------|
 | State machine | `${StackName}-reprice` |
-| Lambdas | `${StackName}-{prepare,plan-chunk,merge,apply}` |
+| Lambdas | `${StackName}-{prepare,plan-all,apply}` |
 | Dashboard | `${StackName}-reprice` |
 | Artifacts | `s3://…/runs/<pricing_run_id>/` |
+| DynamoDB | apply batch idempotency + `plan#checkpoint` rows |
 
-Flow: EventBridge → Prepare → Map(PlanChunk, concurrency 1) → Merge → Apply (if `mode=LIVE` and `safety_ok`).
+Flow: EventBridge (**every 2 hours**) → Prepare (seeds DDB checkpoint) → PlanAll waves (loop while `more`) → Apply if `mode=LIVE` and `safety_ok`.
+
+PlanAll processes as many chunks as fit before `PLAN_WAVE_MIN_REMAINING_MS` (default **8 min** remaining), checkpoints `next_index` in DynamoDB, then SFN re-invokes until merge completes inside the final wave.
 
 ### Deploy
 
@@ -61,11 +64,10 @@ Disable schedule: `ScheduleEnabled=false` in `parameter_overrides` (or pass it o
 
 `$env:CARDTRADER_JWT` is **local only**. It does **not** update Lambda.
 
-Set the same Bearer token on **all four** functions:
+Set the same Bearer token on **all three** functions:
 
 - `${StackName}-prepare`
-- `${StackName}-plan-chunk`
-- `${StackName}-merge`
+- `${StackName}-plan-all`
 - `${StackName}-apply`
 
 **Preferred:** AWS Console → Lambda → each function → Configuration → Environment variables → `CARDTRADER_JWT`.
@@ -79,7 +81,7 @@ sam deploy --parameter-overrides `
   "CardTraderJwt=YOUR_TOKEN"
 ```
 
-If you deploy **without** `CardTraderJwt`, the template sets `CARDTRADER_JWT=""` and can **wipe** a token you previously set in the console. After rotating a CT app token, update AWS explicitly (all four Lambdas) or redeploy with `CardTraderJwt=…`.
+If you deploy **without** `CardTraderJwt`, the template sets `CARDTRADER_JWT=""` and can **wipe** a token you previously set in the console. After rotating a CT app token, update AWS explicitly (all three Lambdas) or redeploy with `CardTraderJwt=…`.
 
 `application_disabled` / HTTP 403 from CardTrader means the API app behind the JWT was disabled — fix/recreate the app in CardTrader, then refresh AWS env vars.
 
